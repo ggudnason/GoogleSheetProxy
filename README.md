@@ -88,6 +88,8 @@ The combined array has every column from every tab. A row gets an empty value fo
 
 Add `?format=object` to get the grouped shape instead: `{ "<sheet>": { "<tab>": [rows] } }` on `/all`, or `{ "<tab>": [rows] }` on `/all/<sheet>`. This is useful for other tools, but vMix can't read it.
 
+Tabs hidden in Google Sheets are left out of `/all` and aren't polled in the background. In the interface they're listed last, dimmed, with a **Hidden** label. A hidden tab's own URL still works. In the Sheets UI, hiding a tab looks a lot like deleting it, so if a tab you removed still shows up, it's probably hidden. Unhide it from Google Sheets' *View → Hidden sheets* menu, or delete it for real.
+
 On `/all`, a sheet that fails to load (wrong key, missing spreadsheet) is left out, and the other sheets still come through. With `?format=object`, the reason is listed under `_errors`.
 
 The `/all` endpoints fetch every tab of a sheet in a single Google API call, and they follow each sheet's cache time and Auto refresh setting. They share the per-tab cache, so `/all` and the single-tab URLs always serve the same data.

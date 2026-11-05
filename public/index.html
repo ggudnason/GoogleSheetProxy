@@ -53,6 +53,7 @@
   .tabs { width: 100%; border-collapse: collapse; }
   .tabs td { padding: 8px 6px; border-top: 1px solid var(--line); vertical-align: middle; }
   .tabs tr:first-child td { border-top: 0; }
+  .tabs tr.hidden-tab td.name, .tabs tr.hidden-tab .url { opacity: .55; }
   .tabs td.name { font-weight: 500; width: 22%; }
   .tabs td.actions { text-align: right; white-space: nowrap; width: 1%; }
   .error-box { color: var(--err); background: var(--err-bg); padding: 10px 12px; border-radius: 7px; overflow-wrap: anywhere; }
@@ -315,7 +316,7 @@ function headHtml(s) {
   const title = h.title && h.title !== s.name ? ` <span class="muted small">(${esc(h.title)})</span>` : '';
   const pill = {
     starting: '<span class="pill">Connecting…</span>',
-    ok: h.tabs ? `<span class="pill ok">${h.tabs.length} tab${h.tabs.length === 1 ? '' : 's'}</span>` : '<span class="pill ok">OK</span>',
+    ok: h.tabs ? (() => { const n = h.tabs.filter((t) => !t.hidden).length; return `<span class="pill ok">${n} tab${n === 1 ? '' : 's'}</span>`; })() : '<span class="pill ok">OK</span>',
     stale: '<span class="pill warn">Using last good data</span>',
     error: '<span class="pill err">Error</span>',
   }[h.state];
@@ -401,10 +402,13 @@ function bodyHtml(s) {
         <button class="link" data-copy="${esc(allUrl)}">Copy</button>
         <a class="btn link" href="${esc(allUrl)}" target="_blank" rel="noopener">Open</a>
       </td></tr>`;
-  return `<table class="tabs">${allRow}${h.tabs.map((t) => {
+  // Visible tabs first; tabs hidden in Google Sheets are listed last, dimmed.
+  const ordered = [...h.tabs.filter((t) => !t.hidden), ...h.tabs.filter((t) => t.hidden)];
+  return `<table class="tabs">${allRow}${ordered.map((t) => {
     const u = tabUrl(s.slug, t.name);
-    return `<tr>
-      <td class="name">${esc(t.name)}</td>
+    const hidden = t.hidden ? ` <span class="pill" title="This tab is hidden in Google Sheets. It's left out of /all and not polled; its own URL still works.">Hidden</span>` : '';
+    return `<tr${t.hidden ? ' class="hidden-tab"' : ''}>
+      <td class="name">${esc(t.name)}${hidden}</td>
       <td class="urlcell"><span class="url">${esc(u)}</span></td>
       <td class="actions">
         <button class="link" data-copy="${esc(u)}">Copy</button>

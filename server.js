@@ -340,7 +340,7 @@ const valuesKey = (a1, render) => `values|${a1}|${render}`;
 
 async function fetchTabs(sheet) {
   const data = await googleGet(sheet, `/spreadsheets/${encodeURIComponent(sheet.spreadsheetId)}`, {
-    fields: 'properties.title,sheets.properties(sheetId,title,index,gridProperties)',
+    fields: 'properties.title,sheets.properties(sheetId,title,index,hidden,gridProperties)',
   });
   return {
     title: data.properties?.title || '',
@@ -348,11 +348,19 @@ async function fetchTabs(sheet) {
       name: s.properties.title,
       index: s.properties.index,
       gid: s.properties.sheetId,
+      hidden: !!s.properties.hidden,
       rows: s.properties.gridProperties?.rowCount,
       columns: s.properties.gridProperties?.columnCount,
     })),
   };
 }
+
+/**
+ * Tabs hidden in Google Sheets are left out of /all and the background poll.
+ * Hiding a tab looks like deleting it in the Sheets UI, so it shouldn't keep
+ * feeding vMix. A hidden tab's own URL still works (read on demand).
+ */
+const visibleTabs = (tabs) => tabs.filter((t) => !t.hidden);
 
 function getTabs(sheet) {
   return cached(sheet, tabsKey, () => fetchTabs(sheet), Math.max(TABS_REFRESH_MS, ttlMs(sheet)));
@@ -402,7 +410,7 @@ function fetchAllValues(sheet, tabs, render) {
 
 /** Cell values for every tab of a sheet, as { tabName: values[][] }. */
 async function getAllValues(sheet, render) {
-  const { tabs } = await getTabs(sheet);
+  const tabs = visibleTabs((await getTabs(sheet)).tabs);
   const entryOf = (t) => cache.get(`${sheet.id}|${valuesKey(a1For(t.name, ''), render)}`);
   const haveAll = tabs.every((t) => entryOf(t)?.data !== undefined);
   const allFresh = haveAll && tabs.every((t) => isFresh(sheet, entryOf(t)));
@@ -436,12 +444,12 @@ async function pollSheet(sheet, { force = false } = {}) {
     tabsData = await refreshTabs(sheet);
   }
   try {
-    await fetchAllValues(sheet, tabsData.tabs, 'FORMATTED_VALUE');
+    await fetchAllValues(sheet, visibleTabs(tabsData.tabs), 'FORMATTED_VALUE');
   } catch (err) {
     // A tab was probably renamed or deleted: re-read the tab list and try once more.
     if (err.googleStatus === 400 && /parse range/i.test(err.detail || '')) {
       tabsData = await refreshTabs(sheet);
-      await fetchAllValues(sheet, tabsData.tabs, 'FORMATTED_VALUE');
+      await fetchAllValues(sheet, visibleTabs(tabsData.tabs), 'FORMATTED_VALUE');
     } else {
       throw err;
     }
@@ -791,9 +799,9 @@ async function handleAdmin(req, res, parts) {
     // old data is kept and the error is returned.
     if (parts[3] === 'reload' && method === 'POST') {
       const tabsData = await refreshTabs(sheet);
-      await fetchAllValues(sheet, tabsData.tabs, 'FORMATTED_VALUE');
+      await fetchAllValues(sheet, visibleTabs(tabsData.tabs), 'FORMATTED_VALUE');
       // Other ranges/formats (?range=, ?render=) are re-read on their next request.
-      const keep = new Set(tabsData.tabs.map((t) => `${sheet.id}|${valuesKey(a1For(t.name, ''), 'FORMATTED_VALUE')}`));
+      const keep = new Set(visibleTabs(tabsData.tabs).map((t) => `${sheet.id}|${valuesKey(a1For(t.name, ''), 'FORMATTED_VALUE')}`));
       for (const k of cache.keys()) if (k.startsWith(`${sheet.id}|values|`) && !keep.has(k)) cache.delete(k);
       return sendJson(res, 200, { ...publicSheet(sheet), health: sheetHealth(sheet) });
     }
