@@ -105,7 +105,7 @@ function slugify(s) {
 function findSheet(slug) {
   const s = config.sheets.find((x) => x.slug === slug) ||
     config.sheets.find((x) => x.slug.toLowerCase() === String(slug).toLowerCase());
-  if (!s) throw httpError(404, `Sheet "${slug}" not found. Available: ${config.sheets.map((x) => x.slug).join(', ') || '(none)'}`);
+  if (!s) throw httpError(404, `Spreadsheet "${slug}" not found. Available: ${config.sheets.map((x) => x.slug).join(', ') || '(none)'}`);
   return s;
 }
 
@@ -272,7 +272,7 @@ function friendlyGoogleError(err, res, body) {
 
 async function googleGet(sheet, urlPath, params = {}) {
   if (!sheet.apiKey) {
-    const e = httpError(400, 'This sheet has no Google API key. Add one in Edit.');
+    const e = httpError(400, 'This spreadsheet has no Google API key. Add one in Edit.');
     e.kind = 'config';
     recordFailure(sheet, e);
     throw e;
@@ -619,7 +619,7 @@ async function resolveTab(sheet, requested) {
     tabs.find((t) => t.name === requested) ||
     tabs.find((t) => t.name.toLowerCase() === requested.toLowerCase()) ||
     (/^\d+$/.test(requested) ? tabs.find((t) => t.index === Number(requested)) : undefined);
-  if (!tab) throw httpError(404, `Tab "${requested}" not found. Available: ${tabs.map((t) => t.name).join(', ')}`);
+  if (!tab) throw httpError(404, `Sheet "${requested}" not found. Available: ${servedTabs(sheet, tabs).map((t) => t.name).join(', ')}`);
   return tab;
 }
 
@@ -997,7 +997,7 @@ const server = http.createServer(async (req, res) => {
 
 function defaultSheet(q) {
   if (q.get('sheet')) return findSheet(q.get('sheet'));
-  if (!config.sheets[0]) throw httpError(400, 'No sheets configured. Add one in the web interface.');
+  if (!config.sheets[0]) throw httpError(400, 'No spreadsheets configured. Add one in the web interface.');
   return config.sheets[0];
 }
 

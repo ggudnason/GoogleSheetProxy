@@ -53,7 +53,6 @@
   .tabs { width: 100%; border-collapse: collapse; }
   .tabs td { padding: 8px 6px; border-top: 1px solid var(--line); vertical-align: middle; }
   .tabs tr:first-child td { border-top: 0; }
-  .tabs tr.hidden-tab td.name, .tabs tr.hidden-tab .url { opacity: .55; }
   .tabs td.name { font-weight: 500; width: 22%; }
   .tabs td.actions { text-align: right; white-space: nowrap; width: 1%; }
   .error-box { color: var(--err); background: var(--err-bg); padding: 10px 12px; border-radius: 7px; overflow-wrap: anywhere; }
@@ -144,10 +143,10 @@
 <header>
   <div>
     <h1>Google Sheet Proxy</h1>
-    <p>Each tab of each sheet is a JSON data source for vMix.</p>
+    <p>Each sheet of each spreadsheet is a JSON data source for vMix.</p>
     <p class="small" id="usage"></p>
   </div>
-  <button class="primary" id="add-btn">+ Add sheet</button>
+  <button class="primary" id="add-btn">+ Add spreadsheet</button>
 </header>
 
 <main>
@@ -155,7 +154,7 @@
   <section class="card" id="all-card" hidden>
     <div class="card-body">
       <table class="tabs"><tr>
-        <td class="name">Everything<div class="small muted" style="font-weight:400">Every row of every sheet, with Sheet and Tab columns</div></td>
+        <td class="name">Everything<div class="small muted" style="font-weight:400">Every row of every spreadsheet in one table, with columns saying where each row came from</div></td>
         <td class="urlcell"><span class="url" id="all-url"></span></td>
         <td class="actions">
           <button class="link" id="all-copy">Copy</button>
@@ -175,13 +174,13 @@
 
 <dialog id="sheet-dialog">
   <form method="dialog" id="sheet-form">
-    <h3 id="sheet-dialog-title">Add sheet</h3>
+    <h3 id="sheet-dialog-title">Add spreadsheet</h3>
     <label>Name
       <input name="name" required placeholder="e.g. Election results">
     </label>
     <label>Spreadsheet URL or ID
       <input name="spreadsheetId" required placeholder="https://docs.google.com/spreadsheets/d/…">
-      <span class="hint">The sheet must be shared as “Anyone with the link → Viewer”.</span>
+      <span class="hint">The spreadsheet must be shared as “Anyone with the link → Viewer”.</span>
     </label>
     <label>URL name <span class="hint">Used in the JSON URL. Leave blank to generate it from the name.</span>
       <input name="slug" placeholder="election-results" pattern="[A-Za-z0-9\-_ ]*">
@@ -199,15 +198,15 @@
         <span class="switch-row"><input type="checkbox" name="refresh" class="switch"> <span id="refresh-label"></span></span>
         <span class="hint">When off, vMix keeps getting the last fetched data until you turn it back on.</span>
       </label>
-      <label>Show hidden tabs
+      <label>Show hidden sheets
         <span class="switch-row"><input type="checkbox" name="showHidden" class="switch"> <span id="hidden-label"></span></span>
-        <span class="hint">Include tabs hidden in Google Sheets in /all. Off by default.</span>
+        <span class="hint">Also list and serve sheets that are hidden in Google Sheets, including in /all. Off by default.</span>
       </label>
     </div>
     <div id="sheet-error" class="error-box" hidden></div>
     <div class="buttons">
       <button type="button" value="cancel" id="sheet-cancel">Cancel</button>
-      <button class="primary" type="submit" id="sheet-submit">Add sheet</button>
+      <button class="primary" type="submit" id="sheet-submit">Add spreadsheet</button>
     </div>
   </form>
 </dialog>
@@ -328,7 +327,7 @@ function headHtml(s) {
   const title = h.title && h.title !== s.name ? ` <span class="muted small">(${esc(h.title)})</span>` : '';
   const pill = {
     starting: '<span class="pill">Connecting…</span>',
-    ok: h.tabs ? (() => { const n = h.tabs.filter((t) => s.showHidden || !t.hidden).length; return `<span class="pill ok">${n} tab${n === 1 ? '' : 's'}</span>`; })() : '<span class="pill ok">OK</span>',
+    ok: h.tabs ? (() => { const n = h.tabs.filter((t) => s.showHidden || !t.hidden).length; return `<span class="pill ok">${n} sheet${n === 1 ? '' : 's'}</span>`; })() : '<span class="pill ok">OK</span>',
     stale: '<span class="pill warn">Using last good data</span>',
     error: '<span class="pill err">Error</span>',
   }[h.state];
@@ -360,9 +359,9 @@ function headHtml(s) {
 function toggleHtml(s) {
   const hasHidden = (s.health.tabs || []).some((t) => t.hidden);
   const hidden = hasHidden || s.showHidden
-    ? `<label class="switch-row" title="Include tabs that are hidden in Google Sheets in /all and polling">
+    ? `<label class="switch-row" title="Also list and serve sheets that are hidden in Google Sheets, including in /all">
       <input type="checkbox" class="switch" data-show-hidden="${esc(s.slug)}" ${s.showHidden ? 'checked' : ''}>
-      Show hidden tabs
+      Show hidden sheets
     </label>` : '';
   return `<label class="switch-row" title="Turn off to freeze the data vMix receives">
       <input type="checkbox" class="switch" data-toggle="${esc(s.slug)}" ${s.refresh ? 'checked' : ''}>
@@ -395,7 +394,7 @@ function noticesHtml(s) {
   if (h.state === 'stale') {
     out.push(`<div class="notice warn"><span><b>${esc(h.lastError)}</b> vMix keeps getting the data from ${fmtTime(h.dataUpdatedAt)}.${retry}${detail}</span>${clear}</div>`);
   } else if (h.state === 'error') {
-    out.push(`<div class="notice err"><span><b>${esc(h.lastError)}</b> vMix gets an error for this sheet until it works.${retry}${detail}</span>${clear}</div>`);
+    out.push(`<div class="notice err"><span><b>${esc(h.lastError)}</b> vMix gets an error for this spreadsheet until it works.${retry}${detail}</span>${clear}</div>`);
   } else if (h.errorsLast10Min > 0 && h.lastErrorAt) {
     out.push(`<div class="notice warn small"><span>Recovered. ${h.errorsLast10Min} error${h.errorsLast10Min === 1 ? '' : 's'} in the last 10 minutes; the last one at ${fmtTime(h.lastErrorAt)}: ${esc(h.lastError)}</span>${clear}</div>`);
   }
@@ -413,25 +412,22 @@ function suggestionHtml(s) {
 
 function bodyHtml(s) {
   const h = s.health;
-  if (!h.tabs) return h.state === 'error' ? '<p class="muted">Tabs will appear once Google answers.</p>' : '<p class="muted">Loading tabs…</p>';
-  if (!h.tabs.length) return '<p class="muted">This spreadsheet has no tabs.</p>';
+  if (!h.tabs) return h.state === 'error' ? '<p class="muted">Sheets will appear once Google answers.</p>' : '<p class="muted">Loading sheets…</p>';
+  if (!h.tabs.length) return '<p class="muted">This spreadsheet has no sheets.</p>';
   const allUrl = `${base}/all/${encodeURIComponent(s.slug)}`;
   const allRow = `<tr>
-      <td class="name">All tabs<div class="small muted" style="font-weight:400">Every row in one table, with a Tab column</div></td>
+      <td class="name">All sheets<div class="small muted" style="font-weight:400">Every row in one table, with a Tab column naming the sheet</div></td>
       <td class="urlcell"><span class="url">${esc(allUrl)}</span></td>
       <td class="actions">
         <button class="link" data-copy="${esc(allUrl)}">Copy</button>
         <a class="btn link" href="${esc(allUrl)}" target="_blank" rel="noopener">Open</a>
       </td></tr>`;
-  // Visible tabs first; tabs hidden in Google Sheets are listed last (dimmed unless shown).
-  const ordered = [...h.tabs.filter((t) => !t.hidden), ...h.tabs.filter((t) => t.hidden)];
-  const hiddenTip = s.showHidden
-    ? 'Hidden in Google Sheets. Included in /all because Show hidden tabs is on.'
-    : "Hidden in Google Sheets. Left out of /all and not polled; its own URL still works. Turn on Show hidden tabs to include it.";
-  return `<table class="tabs">${allRow}${ordered.map((t) => {
+  // Sheets hidden in Google Sheets are only listed (last) when Show hidden sheets is on.
+  const shown = s.showHidden ? [...h.tabs.filter((t) => !t.hidden), ...h.tabs.filter((t) => t.hidden)] : h.tabs.filter((t) => !t.hidden);
+  return `<table class="tabs">${allRow}${shown.map((t) => {
     const u = tabUrl(s.slug, t.name);
-    const hidden = t.hidden ? ` <span class="pill" title="${esc(hiddenTip)}">Hidden</span>` : '';
-    return `<tr${t.hidden && !s.showHidden ? ' class="hidden-tab"' : ''}>
+    const hidden = t.hidden ? ' <span class="pill" title="Hidden in Google Sheets. Included because Show hidden sheets is on.">Hidden</span>' : '';
+    return `<tr>
       <td class="name">${esc(t.name)}${hidden}</td>
       <td class="urlcell"><span class="url">${esc(u)}</span></td>
       <td class="actions">
@@ -476,13 +472,13 @@ function setOpen(slugs, open) {
 function render() {
   const root = $('#sheets');
   $('#sheets-toolbar').hidden = state.sheets.length < 2;
-  $('#sheets-count').textContent = `${state.sheets.length} sheets`;
+  $('#sheets-count').textContent = `${state.sheets.length} spreadsheets`;
   $('#all-card').hidden = state.sheets.length === 0;
 
   const u = state.usage;
   if (u && state.sheets.length) {
     const high = u.readsPerMinute > u.quotaPerMinute * 0.8;
-    $('#usage').textContent = `About ${u.readsPerMinute} Google requests per minute for all live sheets `
+    $('#usage').textContent = `About ${u.readsPerMinute} Google requests per minute for all live spreadsheets `
       + `(Google allows ${u.quotaPerMinute} per minute per Google Cloud project${high ? ' — this is close to the limit; raise some cache times' : ''}).`;
     $('#usage').className = 'small ' + (high ? 'high' : 'muted');
   } else {
@@ -490,7 +486,7 @@ function render() {
   }
 
   if (!state.sheets.length) {
-    patch(root, `<section class="card empty">No sheets yet. Click <b>+ Add sheet</b> to connect a Google Sheet.</section>`);
+    patch(root, `<section class="card empty">No spreadsheets yet. Click <b>+ Add spreadsheet</b> to connect one.</section>`);
     return;
   }
   if (root.querySelector('.empty')) patch(root, '');
@@ -579,7 +575,7 @@ async function setShowHidden(slug, on, input) {
   input.disabled = true;
   try {
     applyState(await api(`/api/sheets/${encodeURIComponent(slug)}`, { method: 'PUT', body: { showHidden: on } }));
-    toast(on ? 'Hidden tabs are now included in /all' : 'Hidden tabs are left out of /all');
+    toast(on ? 'Hidden sheets are now shown and included in /all' : 'Hidden sheets are no longer shown or included in /all');
   } catch (err) {
     toast(err.message);
     input.checked = !on;
@@ -654,8 +650,8 @@ function openSheetDialog(sheet) {
   editing = sheet ? sheet.slug : null;
   form.reset();
   $('#sheet-error').hidden = true;
-  $('#sheet-dialog-title').textContent = sheet ? `Edit ${sheet.name}` : 'Add sheet';
-  $('#sheet-submit').textContent = sheet ? 'Save' : 'Add sheet';
+  $('#sheet-dialog-title').textContent = sheet ? `Edit ${sheet.name}` : 'Add spreadsheet';
+  $('#sheet-submit').textContent = sheet ? 'Save' : 'Add spreadsheet';
   const hasKey = Boolean(sheet && sheet.apiKeySet);
   form.apiKey.required = !hasKey;
   form.apiKey.placeholder = hasKey ? `Saved (${sheet.apiKeyMasked})` : 'AIza…';
@@ -710,7 +706,7 @@ form.addEventListener('submit', async (e) => {
     setOpen([next.saved], wasOpen);
     applyState(next);
     dlg.close();
-    toast(editing ? 'Sheet saved' : 'Sheet added');
+    toast(editing ? 'Spreadsheet saved' : 'Spreadsheet added');
   } catch (err) {
     $('#sheet-error').textContent = err.message;
     $('#sheet-error').hidden = false;
@@ -779,7 +775,7 @@ $('#sheets').addEventListener('click', async (e) => {
     if (!confirm(`Remove "${s.name}" from the proxy? vMix data sources using it will stop updating.`)) return;
     try {
       applyState(await api(`/api/sheets/${encodeURIComponent(d.delete)}`, { method: 'DELETE' }));
-      toast('Sheet removed');
+      toast('Spreadsheet removed');
     } catch (err) {
       toast(err.message);
     }
