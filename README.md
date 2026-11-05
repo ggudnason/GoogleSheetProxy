@@ -33,6 +33,10 @@ Sheets and their settings, including API keys, are saved in `config.json`. Keep 
   - **Paused:** vMix keeps receiving the last fetched data, and Google is not called. Use this to lock graphics while someone edits the sheet. **Fetch latest once** updates the held data a single time without turning live refresh back on.
   - If the proxy restarts while a sheet is paused, it fetches once on the first request and then holds that data.
 - For each sheet, every tab is listed with its JSON URL, a **Copy** button and a **Preview** that shows exactly what vMix will see.
+- With more than one sheet, the cards start collapsed to one line each, showing the sheet's name, status and Live/Paused. Every card header also shows a status dot and how long ago the data vMix gets was last updated, counting up every second:
+  - The dot is green when polling is working, amber when Google is failing and vMix gets the last good data, red when there's no data at all, and dimmed when the sheet is paused. It pulses each time new data arrives from Google.
+  - While Google is failing, the header also shows when the next retry is. The age turns amber when updates have stopped coming through for more than a few poll periods.
+  - Click a card's header to open or close it, or use **Expand all** / **Collapse all**. The page remembers which cards you opened, separately in each browser.
 - The page updates itself every 3 seconds, so you see problems as they happen. This doesn't use any Google requests.
 - At the top, the page estimates how many Google requests per minute all live sheets use, and warns when that's close to Google's limit.
 
