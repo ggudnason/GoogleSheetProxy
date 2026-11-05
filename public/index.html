@@ -1,0 +1,430 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sheet Proxy</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #fff; --text: #1b1d21; --muted: #6b7280; --line: #e3e6eb;
+    --accent: #2563eb; --accent-text: #fff; --ok: #15803d; --ok-bg: #dcfce7; --err: #b91c1c; --err-bg: #fee2e2;
+    --code-bg: #f1f3f6; --shadow: 0 1px 2px rgba(0,0,0,.05);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115; --card: #181b21; --text: #e6e8eb; --muted: #9aa1ac; --line: #2a2f38;
+      --accent: #3b82f6; --ok: #4ade80; --ok-bg: #12301d; --err: #f87171; --err-bg: #3a1515;
+      --code-bg: #20242c; --shadow: none;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+    max-width: 1000px; margin: 0 auto; padding: 28px 16px 8px; }
+  header h1 { margin: 0; font-size: 20px; }
+  header p { margin: 2px 0 0; color: var(--muted); }
+  main { max-width: 1000px; margin: 0 auto; padding: 8px 16px 60px; display: grid; gap: 16px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow); }
+  .card-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 14px 16px; border-bottom: 1px solid var(--line); }
+  .card-head h2 { margin: 0; font-size: 15px; }
+  .card-body { padding: 14px 16px; }
+  a { color: var(--accent); }
+  .grow { flex: 1; min-width: 0; }
+  .muted { color: var(--muted); }
+  .small { font-size: 12px; }
+  button, .btn { font: inherit; border: 1px solid var(--line); background: var(--card); color: var(--text);
+    padding: 6px 12px; border-radius: 7px; cursor: pointer; white-space: nowrap; text-decoration: none; }
+  button:hover, .btn:hover { border-color: var(--muted); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+  button.danger { color: var(--err); }
+  button.link { border: 0; background: none; padding: 2px 6px; color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  input { font: inherit; width: 100%; padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); color: var(--text); }
+  input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  label { display: grid; gap: 4px; font-weight: 500; }
+  label .hint { font-weight: 400; color: var(--muted); font-size: 12px; }
+  .row { display: flex; gap: 10px; align-items: end; flex-wrap: wrap; }
+  .row > label { flex: 1; min-width: 180px; }
+  .pill { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: var(--code-bg); color: var(--muted); }
+  .pill.ok { background: var(--ok-bg); color: var(--ok); }
+  .pill.err { background: var(--err-bg); color: var(--err); }
+  code, .url { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+  .url { background: var(--code-bg); padding: 4px 8px; border-radius: 6px; overflow-wrap: anywhere; display: inline-block; }
+  .tabs { width: 100%; border-collapse: collapse; }
+  .tabs td { padding: 8px 6px; border-top: 1px solid var(--line); vertical-align: middle; }
+  .tabs tr:first-child td { border-top: 0; }
+  .tabs td.name { font-weight: 500; width: 22%; }
+  .tabs td.actions { text-align: right; white-space: nowrap; width: 1%; }
+  .error-box { color: var(--err); background: var(--err-bg); padding: 10px 12px; border-radius: 7px; overflow-wrap: anywhere; }
+  .empty { text-align: center; padding: 40px 16px; color: var(--muted); }
+  dialog { border: 1px solid var(--line); border-radius: 12px; background: var(--card); color: var(--text); padding: 0;
+    width: min(560px, calc(100vw - 32px)); }
+  dialog::backdrop { background: rgba(0,0,0,.4); }
+  dialog form { display: grid; gap: 14px; padding: 20px; }
+  dialog h3 { margin: 0; }
+  dialog .buttons { display: flex; justify-content: end; gap: 8px; }
+  #preview { width: min(1000px, calc(100vw - 32px)); }
+  #preview .wrap { padding: 0 20px 20px; }
+  .table-scroll { overflow: auto; max-height: 60vh; border: 1px solid var(--line); border-radius: 8px; }
+  .data { border-collapse: collapse; width: 100%; font-size: 13px; }
+  .data th, .data td { padding: 6px 10px; border-bottom: 1px solid var(--line); text-align: left; white-space: nowrap; }
+  .data th { position: sticky; top: 0; background: var(--code-bg); }
+  .data td.n { color: var(--muted); }
+  #toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg);
+    padding: 8px 14px; border-radius: 8px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+  #toast.show { opacity: 1; }
+  .switch { appearance: none; -webkit-appearance: none; width: 36px; height: 20px; border-radius: 999px; margin: 0;
+    background: var(--line); position: relative; cursor: pointer; transition: background .15s; flex: none; border: 0; padding: 0; }
+  .switch::after { content: ''; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%;
+    background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.3); transition: transform .15s; }
+  .switch:checked { background: var(--ok); }
+  .switch:checked::after { transform: translateX(16px); }
+  .switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .switch-row { display: inline-flex; align-items: center; gap: 8px; font-weight: 400; min-height: 34px; }
+  .pill.paused { background: #fef3c7; color: #92400e; }
+  @media (prefers-color-scheme: dark) { .pill.paused { background: #3a2a0a; color: #fbbf24; } }
+  .refresh-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 16px; border-bottom: 1px solid var(--line); }
+  .head-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  @media (max-width: 640px) {
+    .card-head .grow { flex-basis: 100%; }
+    .tabs td.name { width: auto; }
+    .tabs tr { display: grid; grid-template-columns: 1fr auto; }
+    .tabs td { border-top: 0; }
+    .tabs tr + tr { border-top: 1px solid var(--line); }
+    .tabs td.urlcell { grid-column: 1 / -1; grid-row: 2; padding-top: 0; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>Google Sheet Proxy</h1>
+    <p>Each tab of each sheet is a JSON data source for vMix.</p>
+  </div>
+  <button class="primary" id="add-btn">+ Add sheet</button>
+</header>
+
+<main>
+  <div id="sheets"></div>
+</main>
+
+<dialog id="sheet-dialog">
+  <form method="dialog" id="sheet-form">
+    <h3 id="sheet-dialog-title">Add sheet</h3>
+    <label>Name
+      <input name="name" required placeholder="e.g. Election results">
+    </label>
+    <label>Spreadsheet URL or ID
+      <input name="spreadsheetId" required placeholder="https://docs.google.com/spreadsheets/d/…">
+      <span class="hint">The sheet must be shared as “Anyone with the link → Viewer”.</span>
+    </label>
+    <label>URL name <span class="hint">Used in the JSON URL. Leave blank to generate it from the name.</span>
+      <input name="slug" placeholder="election-results" pattern="[A-Za-z0-9\-_ ]*">
+    </label>
+    <label>Google API key
+      <input name="apiKey" type="password" autocomplete="off">
+      <span class="hint" id="api-key-hint">A Google Cloud API key with the Google Sheets API enabled.</span>
+    </label>
+    <div class="row" style="align-items:start">
+      <label style="max-width:200px">Cache (seconds)
+        <input name="cacheSeconds" type="number" min="0" max="86400" step="1" required>
+        <span class="hint">How long to reuse Google’s answer before asking again.</span>
+      </label>
+      <label>Auto refresh
+        <span class="switch-row"><input type="checkbox" name="refresh" class="switch"> <span id="refresh-label"></span></span>
+        <span class="hint">When off, vMix keeps getting the last fetched data until you turn it back on.</span>
+      </label>
+    </div>
+    <div id="sheet-error" class="error-box" hidden></div>
+    <div class="buttons">
+      <button type="button" value="cancel" id="sheet-cancel">Cancel</button>
+      <button class="primary" type="submit" id="sheet-submit">Add sheet</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="preview">
+  <form method="dialog" style="padding:16px 20px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+    <h3 class="grow" id="preview-title"></h3>
+    <button type="button" id="preview-refresh">Refresh</button>
+    <button>Close</button>
+  </form>
+  <div class="wrap">
+    <p class="small"><span class="url" id="preview-url"></span></p>
+    <div id="preview-body"></div>
+  </div>
+</dialog>
+
+<div id="toast"></div>
+
+<script>
+const $ = (s, el = document) => el.querySelector(s);
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+const base = location.origin;
+let state = { sheets: [] };
+const statuses = {}; // slug -> { ok, title, tabs, error } | 'loading'
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    ...opts,
+    headers: { 'Content-Type': 'application/json' },
+    body: opts.body ? JSON.stringify(opts.body) : undefined,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || res.statusText);
+  return data;
+}
+
+function toast(msg) {
+  const t = $('#toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(t._h);
+  t._h = setTimeout(() => t.classList.remove('show'), 1600);
+}
+
+async function copy(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const ta = document.createElement('textarea');
+    ta.value = text; document.body.append(ta); ta.select(); document.execCommand('copy'); ta.remove();
+  }
+  toast('Copied');
+}
+
+const tabUrl = (slug, tab) => `${base}/sheet/${encodeURIComponent(slug)}/${encodeURIComponent(tab)}`;
+
+// ---------- rendering ----------
+const fmtTime = (iso) => new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+function renderSheets() {
+  const root = $('#sheets');
+  if (!state.sheets.length) {
+    root.innerHTML = `<section class="card empty">No sheets yet. Click <b>+ Add sheet</b> to connect a Google Sheet.</section>`;
+    return;
+  }
+  root.innerHTML = state.sheets.map((s) => {
+    const st = statuses[s.slug];
+    let pill = '<span class="pill">Checking…</span>';
+    let body = '<p class="muted">Loading tabs…</p>';
+    if (st && st !== 'loading') {
+      if (st.ok) {
+        pill = `<span class="pill ok">${st.tabs.length} tab${st.tabs.length === 1 ? '' : 's'}</span>`;
+        body = st.tabs.length ? `<table class="tabs">${st.tabs.map((t) => {
+          const u = tabUrl(s.slug, t.name);
+          return `<tr>
+            <td class="name">${esc(t.name)}</td>
+            <td class="urlcell"><span class="url">${esc(u)}</span></td>
+            <td class="actions">
+              <button class="link" data-copy="${esc(u)}">Copy</button>
+              <button class="link" data-preview="${esc(s.slug)}" data-tab="${esc(t.name)}">Preview</button>
+            </td></tr>`;
+        }).join('')}</table>` : '<p class="muted">This spreadsheet has no tabs.</p>';
+      } else {
+        pill = '<span class="pill err">Error</span>';
+        body = `<div class="error-box">${esc(st.error)}</div>`;
+      }
+    }
+    const updated = st && st !== 'loading' && st.dataUpdatedAt ? fmtTime(st.dataUpdatedAt) : null;
+    const refreshBar = `<div class="refresh-bar">
+        <label class="switch-row" title="Turn off to freeze the data vMix receives">
+          <input type="checkbox" class="switch" data-toggle="${esc(s.slug)}" ${s.refresh ? 'checked' : ''}>
+          Auto refresh
+        </label>
+        ${s.refresh
+          ? `<span class="pill ok">Live</span><span class="small muted">Cache ${s.cacheSeconds}s${updated ? ` · last fetched ${updated}` : ''}</span>`
+          : `<span class="pill paused">Paused</span><span class="small muted">${updated ? `Serving data fetched at ${updated}` : 'Will fetch once on the first request, then hold'}</span>
+             <button class="link" data-fetch="${esc(s.slug)}">Fetch latest once</button>`}
+      </div>`;
+    const title = st && st.ok && st.title && st.title !== s.name ? ` <span class="muted small">(${esc(st.title)})</span>` : '';
+    return `<section class="card">
+      <div class="card-head">
+        <div class="grow">
+          <h2>${esc(s.name)}${title}</h2>
+          <div class="small muted">
+            /sheet/<b>${esc(s.slug)}</b>
+            · <a href="https://docs.google.com/spreadsheets/d/${encodeURIComponent(s.spreadsheetId)}/edit" target="_blank" rel="noopener">Open in Google Sheets</a>
+            · ${s.apiKeySet ? `key ${esc(s.apiKeyMasked)}` : '<span style="color:var(--err)">no API key</span>'}
+          </div>
+        </div>
+        <div class="head-actions">
+        ${pill}
+        <button data-check="${esc(s.slug)}" title="Re-check the connection and tab list">Check</button>
+        <button data-edit="${esc(s.slug)}">Edit</button>
+        <button class="danger" data-delete="${esc(s.slug)}">Delete</button>
+        </div>
+      </div>
+      ${refreshBar}
+      <div class="card-body">${body}</div>
+    </section>`;
+  }).join('');
+}
+
+async function checkSheet(slug) {
+  statuses[slug] = 'loading';
+  renderSheets();
+  try {
+    statuses[slug] = await api(`/api/sheets/${encodeURIComponent(slug)}/status`);
+  } catch (e) {
+    statuses[slug] = { ok: false, error: e.message };
+  }
+  renderSheets();
+}
+
+async function load() {
+  try {
+    state = await api('/api/config');
+  } catch (e) {
+    $('#sheets').innerHTML = `<section class="card card-body"><div class="error-box">${esc(e.message)}</div></section>`;
+    return;
+  }
+  renderSheets();
+  state.sheets.forEach((s) => checkSheet(s.slug));
+}
+
+// ---------- refresh toggle / fetch once ----------
+async function setRefresh(slug, on, input) {
+  input.disabled = true;
+  try {
+    state = await api(`/api/sheets/${encodeURIComponent(slug)}`, { method: 'PUT', body: { refresh: on } });
+    toast(on ? 'Auto refresh on' : 'Paused — vMix keeps the current data');
+  } catch (err) {
+    toast(err.message);
+  }
+  renderSheets();
+}
+
+async function fetchOnce(slug, btn) {
+  btn.disabled = true;
+  btn.textContent = 'Fetching…';
+  try {
+    const r = await api(`/api/sheets/${encodeURIComponent(slug)}/reload`, { method: 'POST' });
+    if (statuses[slug] && statuses[slug] !== 'loading') statuses[slug].dataUpdatedAt = r.dataUpdatedAt;
+    toast('Snapshot updated');
+  } catch (err) {
+    toast(err.message);
+  }
+  renderSheets();
+}
+
+// ---------- add / edit sheet ----------
+const dlg = $('#sheet-dialog');
+const form = $('#sheet-form');
+let editing = null;
+
+function openSheetDialog(sheet) {
+  editing = sheet ? sheet.slug : null;
+  form.reset();
+  $('#sheet-error').hidden = true;
+  $('#sheet-dialog-title').textContent = sheet ? `Edit ${sheet.name}` : 'Add sheet';
+  $('#sheet-submit').textContent = sheet ? 'Save' : 'Add sheet';
+  const hasKey = Boolean(sheet && sheet.apiKeySet);
+  form.apiKey.required = !hasKey;
+  form.apiKey.placeholder = hasKey ? `Saved (${sheet.apiKeyMasked})` : 'AIza…';
+  $('#api-key-hint').textContent = hasKey
+    ? 'Leave blank to keep the saved key, or paste a new one to replace it.'
+    : 'A Google Cloud API key with the Google Sheets API enabled.';
+  form.cacheSeconds.value = sheet ? sheet.cacheSeconds : 5;
+  form.refresh.checked = sheet ? sheet.refresh : true;
+  syncRefreshLabel();
+  if (sheet) {
+    form.name.value = sheet.name;
+    form.spreadsheetId.value = sheet.spreadsheetId;
+    form.slug.value = sheet.slug;
+  }
+  dlg.showModal();
+}
+
+function syncRefreshLabel() {
+  $('#refresh-label').textContent = form.refresh.checked ? 'On' : 'Off (paused)';
+}
+form.refresh.addEventListener('change', syncRefreshLabel);
+
+$('#add-btn').onclick = () => openSheetDialog(null);
+$('#sheet-cancel').onclick = () => dlg.close();
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const body = {
+    name: form.name.value,
+    spreadsheetId: form.spreadsheetId.value,
+    slug: form.slug.value.trim() || undefined,
+    apiKey: form.apiKey.value.trim() || undefined,
+    cacheSeconds: form.cacheSeconds.value,
+    refresh: form.refresh.checked,
+  };
+  try {
+    state = await api(editing ? `/api/sheets/${encodeURIComponent(editing)}` : '/api/sheets',
+      { method: editing ? 'PUT' : 'POST', body });
+    dlg.close();
+    if (editing) delete statuses[editing];
+    renderSheets();
+    checkSheet(state.saved);
+    toast(editing ? 'Sheet saved' : 'Sheet added');
+  } catch (err) {
+    $('#sheet-error').textContent = err.message;
+    $('#sheet-error').hidden = false;
+  }
+});
+
+// ---------- preview ----------
+const pv = $('#preview');
+let pvCurrent = null;
+
+async function showPreview(slug, tab) {
+  pvCurrent = { slug, tab };
+  const u = tabUrl(slug, tab);
+  $('#preview-title').textContent = tab;
+  $('#preview-url').textContent = u;
+  $('#preview-body').innerHTML = '<p class="muted">Loading…</p>';
+  if (!pv.open) pv.showModal();
+  try {
+    const res = await fetch(u);
+    const rows = await res.json();
+    if (!res.ok) throw new Error(rows.error || res.statusText);
+    if (!rows.length) { $('#preview-body').innerHTML = '<p class="muted">No data rows.</p>'; return; }
+    const cols = Object.keys(rows[0]);
+    $('#preview-body').innerHTML = `<p class="small muted">${rows.length} row${rows.length === 1 ? '' : 's'} · ${cols.length} column${cols.length === 1 ? '' : 's'} · add <code>/N</code> to the URL for a single row</p>
+      <div class="table-scroll"><table class="data">
+        <thead><tr><th>#</th>${cols.map((c) => `<th>${esc(c)}</th>`).join('')}</tr></thead>
+        <tbody>${rows.map((r, i) => `<tr><td class="n">${i + 1}</td>${cols.map((c) => `<td>${esc(r[c])}</td>`).join('')}</tr>`).join('')}</tbody>
+      </table></div>`;
+  } catch (e) {
+    $('#preview-body').innerHTML = `<div class="error-box">${esc(e.message)}</div>`;
+  }
+}
+$('#preview-refresh').onclick = () => pvCurrent && showPreview(pvCurrent.slug, pvCurrent.tab);
+
+// ---------- delegated events ----------
+$('#sheets').addEventListener('change', (e) => {
+  if (e.target.dataset.toggle) setRefresh(e.target.dataset.toggle, e.target.checked, e.target);
+});
+
+$('#sheets').addEventListener('click', async (e) => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  const d = b.dataset;
+  if (d.copy) return copy(d.copy);
+  if (d.preview) return showPreview(d.preview, d.tab);
+  if (d.check) return checkSheet(d.check);
+  if (d.fetch) return fetchOnce(d.fetch, b);
+  if (d.edit) return openSheetDialog(state.sheets.find((s) => s.slug === d.edit));
+  if (d.delete) {
+    const s = state.sheets.find((x) => x.slug === d.delete);
+    if (!confirm(`Remove "${s.name}" from the proxy? vMix data sources using it will stop updating.`)) return;
+    try {
+      state = await api(`/api/sheets/${encodeURIComponent(d.delete)}`, { method: 'DELETE' });
+      delete statuses[d.delete];
+      renderSheets();
+      toast('Sheet removed');
+    } catch (err) {
+      toast(err.message);
+    }
+  }
+});
+
+load();
+</script>
+</body>
+</html>
