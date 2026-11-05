@@ -37,7 +37,7 @@
   button:hover, .btn:hover { border-color: var(--muted); }
   button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
   button.danger { color: var(--err); }
-  button.link { border: 0; background: none; padding: 2px 6px; color: var(--accent); }
+  button.link, .btn.link { border: 0; background: none; padding: 2px 6px; color: var(--accent); }
   button:disabled { opacity: .5; cursor: default; }
   input { font: inherit; width: 100%; padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); color: var(--text); }
   input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
@@ -83,7 +83,23 @@
   .switch-row { display: inline-flex; align-items: center; gap: 8px; font-weight: 400; min-height: 34px; }
   .pill.paused { background: #fef3c7; color: #92400e; }
   @media (prefers-color-scheme: dark) { .pill.paused { background: #3a2a0a; color: #fbbf24; } }
+  .toggle-part { display: inline-flex; align-items: center; gap: 10px; }
   .refresh-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 16px; border-bottom: 1px solid var(--line); }
+  :root { --warn: #92400e; --warn-bg: #fef3c7; --info: #1e40af; --info-bg: #dbeafe; }
+  @media (prefers-color-scheme: dark) { :root { --warn: #fbbf24; --warn-bg: #3a2a0a; --info: #93c5fd; --info-bg: #172554; } }
+  .pill.warn { background: var(--warn-bg); color: var(--warn); }
+  .notice { margin: 10px 16px 0; padding: 10px 12px; border-radius: 7px; overflow-wrap: anywhere; }
+  .notice:last-child { margin-bottom: 10px; }
+  .notice b { font-weight: 600; }
+  .notice.warn { background: var(--warn-bg); color: var(--warn); }
+  .notice.err { background: var(--err-bg); color: var(--err); }
+  .notice.info { background: var(--info-bg); color: var(--info); display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .notice.info span { flex: 1; min-width: 200px; }
+  .notice .detail { display: block; font-size: 12px; opacity: .8; margin-top: 2px; }
+  .notice-area:empty { display: none; }
+  .notice-area { border-bottom: 1px solid var(--line); }
+  #conn-banner { position: sticky; top: 0; z-index: 5; }
+  #usage.high { color: var(--warn); }
   .head-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   @media (max-width: 640px) {
     .card-head .grow { flex-basis: 100%; }
@@ -100,11 +116,26 @@
   <div>
     <h1>Google Sheet Proxy</h1>
     <p>Each tab of each sheet is a JSON data source for vMix.</p>
+    <p class="small" id="usage"></p>
   </div>
   <button class="primary" id="add-btn">+ Add sheet</button>
 </header>
 
 <main>
+  <div id="conn-banner" class="notice err" style="margin:0" hidden></div>
+  <section class="card" id="all-card" hidden>
+    <div class="card-body">
+      <table class="tabs"><tr>
+        <td class="name">Everything<div class="small muted" style="font-weight:400">Every row of every sheet, with Sheet and Tab columns</div></td>
+        <td class="urlcell"><span class="url" id="all-url"></span></td>
+        <td class="actions">
+          <button class="link" id="all-copy">Copy</button>
+          <a class="btn link" id="all-open" target="_blank" rel="noopener" style="border:0;padding:2px 6px">Open</a>
+        </td>
+      </tr></table>
+    </div>
+  </section>
+
   <div id="sheets"></div>
 </main>
 
@@ -162,7 +193,8 @@ const $ = (s, el = document) => el.querySelector(s);
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const base = location.origin;
 let state = { sheets: [] };
-const statuses = {}; // slug -> { ok, title, tabs, error } | 'loading'
+let clockOffset = 0; // server time - browser time, for retry countdowns
+const POLL_MS = 3000;
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -180,7 +212,7 @@ function toast(msg) {
   t.textContent = msg;
   t.classList.add('show');
   clearTimeout(t._h);
-  t._h = setTimeout(() => t.classList.remove('show'), 1600);
+  t._h = setTimeout(() => t.classList.remove('show'), 2400);
 }
 
 async function copy(text) {
@@ -194,118 +226,247 @@ async function copy(text) {
 }
 
 const tabUrl = (slug, tab) => `${base}/sheet/${encodeURIComponent(slug)}/${encodeURIComponent(tab)}`;
+const fmtTime = (iso) => new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+const secondsUntil = (iso) => Math.max(0, Math.round((new Date(iso) - (Date.now() + clockOffset)) / 1000));
 
 // ---------- rendering ----------
-const fmtTime = (iso) => new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+// Each card is split into parts that are only redrawn when their content changes,
+// so the page can refresh every few seconds without flicker or lost clicks.
 
-function renderSheets() {
-  const root = $('#sheets');
-  if (!state.sheets.length) {
-    root.innerHTML = `<section class="card empty">No sheets yet. Click <b>+ Add sheet</b> to connect a Google Sheet.</section>`;
-    return;
-  }
-  root.innerHTML = state.sheets.map((s) => {
-    const st = statuses[s.slug];
-    let pill = '<span class="pill">Checking…</span>';
-    let body = '<p class="muted">Loading tabs…</p>';
-    if (st && st !== 'loading') {
-      if (st.ok) {
-        pill = `<span class="pill ok">${st.tabs.length} tab${st.tabs.length === 1 ? '' : 's'}</span>`;
-        body = st.tabs.length ? `<table class="tabs">${st.tabs.map((t) => {
-          const u = tabUrl(s.slug, t.name);
-          return `<tr>
-            <td class="name">${esc(t.name)}</td>
-            <td class="urlcell"><span class="url">${esc(u)}</span></td>
-            <td class="actions">
-              <button class="link" data-copy="${esc(u)}">Copy</button>
-              <button class="link" data-preview="${esc(s.slug)}" data-tab="${esc(t.name)}">Preview</button>
-            </td></tr>`;
-        }).join('')}</table>` : '<p class="muted">This spreadsheet has no tabs.</p>';
-      } else {
-        pill = '<span class="pill err">Error</span>';
-        body = `<div class="error-box">${esc(st.error)}</div>`;
-      }
-    }
-    const updated = st && st !== 'loading' && st.dataUpdatedAt ? fmtTime(st.dataUpdatedAt) : null;
-    const refreshBar = `<div class="refresh-bar">
-        <label class="switch-row" title="Turn off to freeze the data vMix receives">
-          <input type="checkbox" class="switch" data-toggle="${esc(s.slug)}" ${s.refresh ? 'checked' : ''}>
-          Auto refresh
-        </label>
-        ${s.refresh
-          ? `<span class="pill ok">Live</span><span class="small muted">Cache ${s.cacheSeconds}s${updated ? ` · last fetched ${updated}` : ''}</span>`
-          : `<span class="pill paused">Paused</span><span class="small muted">${updated ? `Serving data fetched at ${updated}` : 'Will fetch once on the first request, then hold'}</span>
-             <button class="link" data-fetch="${esc(s.slug)}">Fetch latest once</button>`}
-      </div>`;
-    const title = st && st.ok && st.title && st.title !== s.name ? ` <span class="muted small">(${esc(st.title)})</span>` : '';
-    return `<section class="card">
-      <div class="card-head">
-        <div class="grow">
-          <h2>${esc(s.name)}${title}</h2>
-          <div class="small muted">
-            /sheet/<b>${esc(s.slug)}</b>
-            · <a href="https://docs.google.com/spreadsheets/d/${encodeURIComponent(s.spreadsheetId)}/edit" target="_blank" rel="noopener">Open in Google Sheets</a>
-            · ${s.apiKeySet ? `key ${esc(s.apiKeyMasked)}` : '<span style="color:var(--err)">no API key</span>'}
-          </div>
-        </div>
-        <div class="head-actions">
-        ${pill}
-        <button data-check="${esc(s.slug)}" title="Re-check the connection and tab list">Check</button>
-        <button data-edit="${esc(s.slug)}">Edit</button>
-        <button class="danger" data-delete="${esc(s.slug)}">Delete</button>
-        </div>
+function headHtml(s) {
+  const h = s.health;
+  const title = h.title && h.title !== s.name ? ` <span class="muted small">(${esc(h.title)})</span>` : '';
+  const pill = {
+    starting: '<span class="pill">Connecting…</span>',
+    ok: h.tabs ? `<span class="pill ok">${h.tabs.length} tab${h.tabs.length === 1 ? '' : 's'}</span>` : '<span class="pill ok">OK</span>',
+    stale: '<span class="pill warn">Using last good data</span>',
+    error: '<span class="pill err">Error</span>',
+  }[h.state];
+  return `<div class="grow">
+      <h2>${esc(s.name)}${title}</h2>
+      <div class="small muted">
+        /sheet/<b>${esc(s.slug)}</b>
+        · <a href="https://docs.google.com/spreadsheets/d/${encodeURIComponent(s.spreadsheetId)}/edit" target="_blank" rel="noopener">Open in Google Sheets</a>
+        · ${s.apiKeySet ? `key ${esc(s.apiKeyMasked)}` : '<span style="color:var(--err)">no API key</span>'}
       </div>
-      ${refreshBar}
-      <div class="card-body">${body}</div>
-    </section>`;
-  }).join('');
+    </div>
+    <div class="head-actions">
+      ${pill}
+      <button data-check="${esc(s.slug)}" title="Try Google right now">Check</button>
+      <button data-edit="${esc(s.slug)}">Edit</button>
+      <button class="danger" data-delete="${esc(s.slug)}">Delete</button>
+    </div>`;
 }
 
-async function checkSheet(slug) {
-  statuses[slug] = 'loading';
-  renderSheets();
-  try {
-    statuses[slug] = await api(`/api/sheets/${encodeURIComponent(slug)}/status`);
-  } catch (e) {
-    statuses[slug] = { ok: false, error: e.message };
+function toggleHtml(s) {
+  return `<label class="switch-row" title="Turn off to freeze the data vMix receives">
+      <input type="checkbox" class="switch" data-toggle="${esc(s.slug)}" ${s.refresh ? 'checked' : ''}>
+      Auto refresh
+    </label>
+    ${s.refresh ? '<span class="pill ok">Live</span>' : '<span class="pill paused">Paused</span>'}`;
+}
+
+function infoHtml(s) {
+  const h = s.health;
+  const updated = h.dataUpdatedAt ? fmtTime(h.dataUpdatedAt) : null;
+  if (s.refresh) {
+    return `<span class="small muted">Cache ${s.cacheSeconds}s${updated ? ` · data from ${updated}` : ''}</span>`;
   }
-  renderSheets();
+  return `<span class="small muted">${updated ? `Holding data fetched at ${updated}` : 'Will fetch once on the first request, then hold'}</span>
+    <button class="link" data-fetch="${esc(s.slug)}">Fetch latest once</button>`;
 }
 
-async function load() {
-  try {
-    state = await api('/api/config');
-  } catch (e) {
-    $('#sheets').innerHTML = `<section class="card card-body"><div class="error-box">${esc(e.message)}</div></section>`;
+function noticesHtml(s) {
+  const h = s.health;
+  const out = [];
+  const retry = h.nextRetryAt && s.refresh
+    ? ` Trying again in ${secondsUntil(h.nextRetryAt) || 'a moment'}${secondsUntil(h.nextRetryAt) ? 's' : ''} (attempt ${h.consecutiveFailures + 1}).`
+    : '';
+  const detail = h.lastErrorDetail && h.lastErrorDetail !== h.lastError
+    ? `<span class="detail">Google said: ${esc(h.lastErrorDetail)}</span>` : '';
+
+  if (h.state === 'stale') {
+    out.push(`<div class="notice warn"><b>${esc(h.lastError)}</b> vMix keeps getting the data from ${fmtTime(h.dataUpdatedAt)}.${retry}${detail}</div>`);
+  } else if (h.state === 'error') {
+    out.push(`<div class="notice err"><b>${esc(h.lastError)}</b> vMix gets an error for this sheet until it works.${retry}${detail}</div>`);
+  } else if (h.errorsLast10Min > 0 && h.lastErrorAt) {
+    out.push(`<div class="notice warn small">Recovered. ${h.errorsLast10Min} error${h.errorsLast10Min === 1 ? '' : 's'} in the last 10 minutes; the last one at ${fmtTime(h.lastErrorAt)}: ${esc(h.lastError)}</div>`);
+  }
+  return out.join('');
+}
+
+// Kept separate from the status notice (whose countdown changes every few seconds)
+// so its button isn't redrawn under the mouse.
+function suggestionHtml(s) {
+  const sg = s.health.suggestion;
+  if (!sg) return '';
+  return `<div class="notice info"><span><b>Suggestion:</b> ${esc(sg.message)}</span>
+    <button data-apply-cache="${esc(s.slug)}" data-seconds="${sg.cacheSeconds}">Use ${sg.cacheSeconds}s</button></div>`;
+}
+
+function bodyHtml(s) {
+  const h = s.health;
+  if (!h.tabs) return h.state === 'error' ? '<p class="muted">Tabs will appear once Google answers.</p>' : '<p class="muted">Loading tabs…</p>';
+  if (!h.tabs.length) return '<p class="muted">This spreadsheet has no tabs.</p>';
+  const allUrl = `${base}/all/${encodeURIComponent(s.slug)}`;
+  const allRow = `<tr>
+      <td class="name">All tabs<div class="small muted" style="font-weight:400">Every row in one table, with a Tab column</div></td>
+      <td class="urlcell"><span class="url">${esc(allUrl)}</span></td>
+      <td class="actions">
+        <button class="link" data-copy="${esc(allUrl)}">Copy</button>
+        <a class="btn link" href="${esc(allUrl)}" target="_blank" rel="noopener">Open</a>
+      </td></tr>`;
+  return `<table class="tabs">${allRow}${h.tabs.map((t) => {
+    const u = tabUrl(s.slug, t.name);
+    return `<tr>
+      <td class="name">${esc(t.name)}</td>
+      <td class="urlcell"><span class="url">${esc(u)}</span></td>
+      <td class="actions">
+        <button class="link" data-copy="${esc(u)}">Copy</button>
+        <button class="link" data-preview="${esc(s.slug)}" data-tab="${esc(t.name)}">Preview</button>
+      </td></tr>`;
+  }).join('')}</table>`;
+}
+
+/** Set innerHTML only if it changed (keeps focus, hover and clicks intact). */
+function patch(el, html) {
+  if (el._html !== html) {
+    el.innerHTML = html;
+    el._html = html;
+  }
+}
+
+function render() {
+  const root = $('#sheets');
+  $('#all-card').hidden = state.sheets.length === 0;
+
+  const u = state.usage;
+  if (u && state.sheets.length) {
+    const high = u.readsPerMinute > u.quotaPerMinute * 0.8;
+    $('#usage').textContent = `About ${u.readsPerMinute} Google requests per minute for all live sheets `
+      + `(Google allows ${u.quotaPerMinute} per minute per Google Cloud project${high ? ' — this is close to the limit; raise some cache times' : ''}).`;
+    $('#usage').className = 'small ' + (high ? 'high' : 'muted');
+  } else {
+    $('#usage').textContent = '';
+  }
+
+  if (!state.sheets.length) {
+    patch(root, `<section class="card empty">No sheets yet. Click <b>+ Add sheet</b> to connect a Google Sheet.</section>`);
     return;
   }
-  renderSheets();
-  state.sheets.forEach((s) => checkSheet(s.slug));
+  if (root.querySelector('.empty')) patch(root, '');
+
+  const wanted = state.sheets.map((s) => s.slug);
+  // Remove cards for deleted sheets.
+  for (const card of [...root.querySelectorAll('section[data-card]')]) {
+    if (!wanted.includes(card.dataset.card)) card.remove();
+  }
+  state.sheets.forEach((s, i) => {
+    let card = root.querySelector(`section[data-card="${CSS.escape(s.slug)}"]`);
+    if (!card) {
+      card = document.createElement('section');
+      card.className = 'card';
+      card.dataset.card = s.slug;
+      card.innerHTML = `<div class="card-head"></div>
+        <div class="refresh-bar"><span class="toggle-part"></span><span class="info-part" style="display:contents"></span></div>
+        <div class="notice-area"></div>
+        <div class="notice-area suggest-area"></div>
+        <div class="card-body"></div>`;
+    }
+    if (root.children[i] !== card) root.insertBefore(card, root.children[i] || null);
+    patch(card.querySelector('.card-head'), headHtml(s));
+    patch(card.querySelector('.toggle-part'), toggleHtml(s));
+    patch(card.querySelector('.info-part'), infoHtml(s));
+    patch(card.querySelector('.notice-area:not(.suggest-area)'), noticesHtml(s));
+    patch(card.querySelector('.suggest-area'), suggestionHtml(s));
+    patch(card.querySelector('.card-body'), bodyHtml(s));
+  });
 }
 
-// ---------- refresh toggle / fetch once ----------
+function applyState(next) {
+  state = next;
+  if (next.serverTime) clockOffset = new Date(next.serverTime) - Date.now();
+  render();
+}
+
+/** Replace one sheet's entry (from Check / Fetch once responses). */
+function applySheet(sheet) {
+  const i = state.sheets.findIndex((s) => s.slug === sheet.slug);
+  if (i >= 0) state.sheets[i] = sheet;
+  render();
+}
+
+// Poll the proxy's own state every few seconds. This never calls Google, and it
+// keeps going even if the proxy can't be reached for a while.
+async function poll() {
+  try {
+    applyState(await api('/api/state'));
+    $('#conn-banner').hidden = true;
+  } catch (e) {
+    $('#conn-banner').textContent = `Can’t reach the proxy server (${e.message}). Is it still running? Trying again…`;
+    $('#conn-banner').hidden = false;
+  } finally {
+    setTimeout(poll, POLL_MS);
+  }
+}
+
+// ---------- actions ----------
 async function setRefresh(slug, on, input) {
   input.disabled = true;
   try {
-    state = await api(`/api/sheets/${encodeURIComponent(slug)}`, { method: 'PUT', body: { refresh: on } });
+    applyState(await api(`/api/sheets/${encodeURIComponent(slug)}`, { method: 'PUT', body: { refresh: on } }));
     toast(on ? 'Auto refresh on' : 'Paused — vMix keeps the current data');
   } catch (err) {
     toast(err.message);
+    input.checked = !on;
   }
-  renderSheets();
+  input.disabled = false;
 }
 
-async function fetchOnce(slug, btn) {
+async function busy(btn, label, fn) {
+  const old = btn.textContent;
   btn.disabled = true;
-  btn.textContent = 'Fetching…';
+  btn.textContent = label;
   try {
-    const r = await api(`/api/sheets/${encodeURIComponent(slug)}/reload`, { method: 'POST' });
-    if (statuses[slug] && statuses[slug] !== 'loading') statuses[slug].dataUpdatedAt = r.dataUpdatedAt;
-    toast('Snapshot updated');
-  } catch (err) {
-    toast(err.message);
+    await fn();
+  } finally {
+    btn.disabled = false;
+    btn.textContent = old;
   }
-  renderSheets();
+}
+
+function checkSheet(slug, btn) {
+  return busy(btn, 'Checking…', async () => {
+    try {
+      const sheet = await api(`/api/sheets/${encodeURIComponent(slug)}/check`, { method: 'POST' });
+      applySheet(sheet);
+      toast(sheet.health.consecutiveFailures ? sheet.health.lastError : 'Google answered');
+    } catch (err) {
+      toast(err.message);
+    }
+  });
+}
+
+function fetchOnce(slug, btn) {
+  return busy(btn, 'Fetching…', async () => {
+    try {
+      applySheet(await api(`/api/sheets/${encodeURIComponent(slug)}/reload`, { method: 'POST' }));
+      toast('Held data updated');
+    } catch (err) {
+      toast(`Kept the previous data. ${err.message}`);
+    }
+  });
+}
+
+async function applyCache(slug, seconds, btn) {
+  return busy(btn, 'Saving…', async () => {
+    try {
+      applyState(await api(`/api/sheets/${encodeURIComponent(slug)}`, { method: 'PUT', body: { cacheSeconds: seconds } }));
+      toast(`Cache time set to ${seconds}s`);
+    } catch (err) {
+      toast(err.message);
+    }
+  });
 }
 
 // ---------- add / edit sheet ----------
@@ -341,6 +502,10 @@ function syncRefreshLabel() {
 }
 form.refresh.addEventListener('change', syncRefreshLabel);
 
+$('#all-url').textContent = `${base}/all`;
+$('#all-open').href = `${base}/all`;
+$('#all-copy').onclick = () => copy(`${base}/all`);
+
 $('#add-btn').onclick = () => openSheetDialog(null);
 $('#sheet-cancel').onclick = () => dlg.close();
 
@@ -355,12 +520,9 @@ form.addEventListener('submit', async (e) => {
     refresh: form.refresh.checked,
   };
   try {
-    state = await api(editing ? `/api/sheets/${encodeURIComponent(editing)}` : '/api/sheets',
-      { method: editing ? 'PUT' : 'POST', body });
+    applyState(await api(editing ? `/api/sheets/${encodeURIComponent(editing)}` : '/api/sheets',
+      { method: editing ? 'PUT' : 'POST', body }));
     dlg.close();
-    if (editing) delete statuses[editing];
-    renderSheets();
-    checkSheet(state.saved);
     toast(editing ? 'Sheet saved' : 'Sheet added');
   } catch (err) {
     $('#sheet-error').textContent = err.message;
@@ -380,14 +542,20 @@ async function showPreview(slug, tab) {
   $('#preview-body').innerHTML = '<p class="muted">Loading…</p>';
   if (!pv.open) pv.showModal();
   try {
-    const res = await fetch(u);
+    const [res, rawRes] = await Promise.all([fetch(u), fetch(u + '?raw')]);
     const rows = await res.json();
     if (!res.ok) throw new Error(rows.error || res.statusText);
+    const raw = rawRes.ok ? await rawRes.json() : [];
+    const originals = (raw[0] || []).map((h) => String(h ?? '').trim());
     if (!rows.length) { $('#preview-body').innerHTML = '<p class="muted">No data rows.</p>'; return; }
     const cols = Object.keys(rows[0]);
-    $('#preview-body').innerHTML = `<p class="small muted">${rows.length} row${rows.length === 1 ? '' : 's'} · ${cols.length} column${cols.length === 1 ? '' : 's'} · add <code>/N</code> to the URL for a single row</p>
+    $('#preview-body').innerHTML = `<p class="small muted">${rows.length} row${rows.length === 1 ? '' : 's'} · ${cols.length} column${cols.length === 1 ? '' : 's'} · add <code>/N</code> to the URL for a single row · column names are the ones vMix sees, with the sheet’s own name underneath when it differs</p>
       <div class="table-scroll"><table class="data">
-        <thead><tr><th>#</th>${cols.map((c) => `<th>${esc(c)}</th>`).join('')}</tr></thead>
+        <thead><tr><th>#</th>${cols.map((c, i) => {
+          const orig = originals[i];
+          const sub = orig && orig !== c ? `<div class="small muted" style="font-weight:400" title="Name in the sheet">${esc(orig.replace(/\n/g, ' '))}</div>` : '';
+          return `<th>${esc(c)}${sub}</th>`;
+        }).join('')}</tr></thead>
         <tbody>${rows.map((r, i) => `<tr><td class="n">${i + 1}</td>${cols.map((c) => `<td>${esc(r[c])}</td>`).join('')}</tr>`).join('')}</tbody>
       </table></div>`;
   } catch (e) {
@@ -407,16 +575,15 @@ $('#sheets').addEventListener('click', async (e) => {
   const d = b.dataset;
   if (d.copy) return copy(d.copy);
   if (d.preview) return showPreview(d.preview, d.tab);
-  if (d.check) return checkSheet(d.check);
+  if (d.check) return checkSheet(d.check, b);
   if (d.fetch) return fetchOnce(d.fetch, b);
+  if (d.applyCache) return applyCache(d.applyCache, Number(d.seconds), b);
   if (d.edit) return openSheetDialog(state.sheets.find((s) => s.slug === d.edit));
   if (d.delete) {
     const s = state.sheets.find((x) => x.slug === d.delete);
     if (!confirm(`Remove "${s.name}" from the proxy? vMix data sources using it will stop updating.`)) return;
     try {
-      state = await api(`/api/sheets/${encodeURIComponent(d.delete)}`, { method: 'DELETE' });
-      delete statuses[d.delete];
-      renderSheets();
+      applyState(await api(`/api/sheets/${encodeURIComponent(d.delete)}`, { method: 'DELETE' }));
       toast('Sheet removed');
     } catch (err) {
       toast(err.message);
@@ -424,7 +591,7 @@ $('#sheets').addEventListener('click', async (e) => {
   }
 });
 
-load();
+poll();
 </script>
 </body>
 </html>

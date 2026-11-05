@@ -109,11 +109,6 @@ function findSheet(slug) {
   return s;
 }
 
-function keyFor(sheet) {
-  if (!sheet.apiKey) throw httpError(400, `Sheet "${sheet.slug}" has no Google API key. Add one in the web interface.`);
-  return sheet.apiKey;
-}
-
 function maskKey(k) {
   if (!k) return '';
   return k.length > 12 ? `${k.slice(0, 4)}…${k.slice(-4)}` : '••••';
@@ -126,38 +121,38 @@ function httpError(status, message) {
 }
 
 // ---------------------------------------------------------------------------
-// Google Sheets API with a per-sheet TTL cache (protects your API quota when
-// vMix polls every second). When a sheet's refresh is turned off, the last
-// fetched data is served indefinitely and Google is not called again.
+// Google Sheets access
+//
+// * Background poller: every live sheet is re-read from Google every
+//   `cacheSeconds` (one batch call for all tabs), whether or not vMix is asking.
+//   If a poll fails it waits a moment and tries again (2s, 4s, 8s ... up to 30s),
+//   forever. It never stops polling because of an error.
+// * Requests from vMix are answered from the cache straight away. If the
+//   cached copy is old (because Google is failing), the old data is served and
+//   a refresh is attempted in the background, so vMix never waits on Google
+//   and graphics never go blank.
+// * Paused sheets (refresh off) are not polled; their last data is held.
+// * Every Google call updates the sheet's health record, which the web
+//   interface shows.
 // ---------------------------------------------------------------------------
-const cache = new Map(); // "<sheet id>|<kind>|..." -> { time, data, pending }
+const GOOGLE_TIMEOUT_MS = Number(process.env.GOOGLE_TIMEOUT_MS) || 10000;
+const TABS_REFRESH_MS = 60000; // how often the tab list itself is re-read
+const MAX_RETRY_MS = 30000;
+const ERROR_WINDOW_MS = 10 * 60 * 1000; // "recent errors" window used for suggestions
+const QUOTA_PER_MINUTE = 300; // Google Sheets API read quota per Cloud project
 
-async function cached(sheet, key, loader) {
-  key = `${sheet.id}|${key}`;
-  const entry = cache.get(key);
-  if (entry && entry.data !== undefined) {
-    if (sheet.refresh === false) return entry.data;
-    if (Date.now() - entry.time < (sheet.cacheSeconds ?? DEFAULT_CACHE_SECONDS) * 1000) return entry.data;
-  }
-  if (entry && entry.pending) return entry.pending; // de-duplicate concurrent requests
+const cache = new Map(); // "<sheet id>|<kind>|..." -> { time, data }
+const inFlight = new Map(); // de-duplicates concurrent fetches of the same thing
 
-  const pending = loader()
-    .then((data) => {
-      cache.set(key, { time: Date.now(), data });
-      return data;
-    })
-    .catch((err) => {
-      // Serve stale data if Google is unreachable, so the vMix graphic doesn't blank out.
-      if (entry && entry.data !== undefined && err.status !== 404) {
-        console.warn(`[stale] ${key}: ${err.message}`);
-        cache.set(key, { time: entry.time, data: entry.data });
-        return entry.data;
-      }
-      cache.delete(key);
-      throw err;
-    });
-  cache.set(key, { ...(entry || {}), pending });
-  return pending;
+const ttlMs = (sheet) => Math.max(1, sheet.cacheSeconds ?? DEFAULT_CACHE_SECONDS) * 1000;
+
+/** True if a cache entry can be served without asking Google. */
+function isFresh(sheet, entry, maxAgeMs = ttlMs(sheet)) {
+  if (!entry || entry.data === undefined) return false;
+  if (sheet.refresh === false) return true;
+  // A little slack so a vMix request arriving just before the poller's next run
+  // doesn't trigger a second, duplicate fetch.
+  return Date.now() - entry.time < maxAgeMs + 2000;
 }
 
 /** Drop cached entries for a sheet; kind = 'tabs' or 'values' to drop only those. */
@@ -169,55 +164,444 @@ function clearCache(sheet, kind) {
 /** When this sheet's cell data was last fetched from Google (null if never). */
 function dataUpdatedAt(sheet) {
   let latest = 0;
-  for (const [k, v] of cache) if (k.startsWith(`${sheet.id}|values|`) && v.time > latest) latest = v.time;
+  for (const [k, v] of cache) {
+    if (k.startsWith(`${sheet.id}|values|`) && v.data !== undefined && v.time > latest) latest = v.time;
+  }
   return latest ? new Date(latest).toISOString() : null;
 }
 
-async function googleGet(apiKey, urlPath, params = {}) {
-  const url = new URL(env.apiBase + urlPath);
-  url.searchParams.set('key', apiKey);
-  for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
+// ---- health -----------------------------------------------------------------
+const health = new Map(); // sheet id -> record
 
-  const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const msg = body.error?.message || res.statusText;
-    throw httpError(res.status === 404 ? 404 : 502, `Google API ${res.status}: ${msg}`);
+function healthOf(sheet) {
+  if (!health.has(sheet.id)) {
+    health.set(sheet.id, {
+      lastSuccessAt: 0,
+      lastErrorAt: 0,
+      lastError: null, // Error with a plain-language message
+      consecutiveFailures: 0,
+      nextRetryAt: 0,
+      recentErrors: [], // [{ at, kind }] within ERROR_WINDOW_MS
+      cacheChangedAt: 0, // suggestions only count errors after the cache time last changed
+    });
   }
+  return health.get(sheet.id);
+}
+
+function recordSuccess(sheet) {
+  const h = healthOf(sheet);
+  h.lastSuccessAt = Date.now();
+  h.consecutiveFailures = 0;
+  h.nextRetryAt = 0;
+}
+
+function recordFailure(sheet, err) {
+  const h = healthOf(sheet);
+  const now = Date.now();
+  h.lastErrorAt = now;
+  h.lastError = err;
+  h.consecutiveFailures += 1;
+  h.nextRetryAt = now + retryDelayMs(h.consecutiveFailures);
+  h.recentErrors = h.recentErrors.filter((e) => now - e.at < ERROR_WINDOW_MS);
+  h.recentErrors.push({ at: now, kind: err.kind });
+  console.warn(`[${sheet.slug}] ${err.message} (failure ${h.consecutiveFailures}, retrying in ${Math.round(retryDelayMs(h.consecutiveFailures) / 1000)}s)`);
+}
+
+/** Wait between retries after n failures in a row: 2s, 4s, 8s, 16s, then 30s. */
+function retryDelayMs(n) {
+  return Math.min(MAX_RETRY_MS, 2000 * 2 ** Math.max(0, n - 1));
+}
+
+/** Whether a request may call Google now, or should wait for the retry delay. */
+function mayCallGoogle(sheet) {
+  return Date.now() >= healthOf(sheet).nextRetryAt;
+}
+
+// ---- talking to Google ------------------------------------------------------
+
+/** Turn any fetch/HTTP failure into an Error with a message a person can act on. */
+function friendlyGoogleError(err, res, body) {
+  let e;
+  if (res) {
+    const detail = body?.error?.message || res.statusText;
+    const s = res.status;
+    let msg;
+    let kind = 'google';
+    if (s === 429) {
+      msg = 'Google’s request limit was reached (too many requests). Increase the cache time.';
+      kind = 'quota';
+    } else if (s === 400 && /api key/i.test(detail)) {
+      msg = 'The API key is not valid. Check it in Edit.';
+      kind = 'config';
+    } else if (s === 403) {
+      msg = 'Google refused access. Check that the sheet is shared as “Anyone with the link → Viewer” and the Google Sheets API is enabled for this key.';
+      kind = 'config';
+    } else if (s === 404) {
+      msg = 'Spreadsheet not found. Check the URL in Edit.';
+      kind = 'config';
+    } else if (s >= 500) {
+      msg = `Google Sheets had a server problem (${s}). This is usually temporary.`;
+    } else {
+      msg = `Google returned an error (${s}).`;
+    }
+    e = httpError(s === 404 ? 404 : 502, msg);
+    e.kind = kind;
+    e.detail = detail;
+    e.googleStatus = s;
+    return e;
+  }
+  if (err?.name === 'TimeoutError' || err?.name === 'AbortError') {
+    e = httpError(504, `Google Sheets did not respond within ${GOOGLE_TIMEOUT_MS / 1000} seconds.`);
+    e.kind = 'timeout';
+  } else {
+    const code = err?.cause?.code || '';
+    if (['ENOTFOUND', 'EAI_AGAIN'].includes(code)) {
+      e = httpError(502, 'Can’t reach Google: no internet connection or DNS is not working.');
+    } else if (['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'EHOSTUNREACH', 'ENETUNREACH', 'UND_ERR_CONNECT_TIMEOUT'].includes(code)) {
+      e = httpError(502, `Can’t reach Google: the connection failed (${code}).`);
+    } else if (['UND_ERR_SOCKET', 'UND_ERR_CLOSED'].includes(code)) {
+      e = httpError(502, 'Can’t reach Google: the connection was cut off.');
+    } else {
+      e = httpError(502, `Can’t reach Google: ${err?.cause?.message || err?.message || 'unknown network error'}.`);
+    }
+    e.kind = 'network';
+  }
+  e.detail = err?.message;
+  return e;
+}
+
+async function googleGet(sheet, urlPath, params = {}) {
+  if (!sheet.apiKey) {
+    const e = httpError(400, 'This sheet has no Google API key. Add one in Edit.');
+    e.kind = 'config';
+    recordFailure(sheet, e);
+    throw e;
+  }
+  const url = new URL(env.apiBase + urlPath);
+  url.searchParams.set('key', sheet.apiKey);
+  for (const [k, v] of Object.entries(params)) {
+    for (const item of Array.isArray(v) ? v : [v]) url.searchParams.append(k, item);
+  }
+
+  let res;
+  let body;
+  try {
+    res = await fetch(url, { signal: AbortSignal.timeout(GOOGLE_TIMEOUT_MS) });
+    body = await res.json().catch(() => ({}));
+  } catch (err) {
+    const e = friendlyGoogleError(err);
+    recordFailure(sheet, e);
+    throw e;
+  }
+  if (!res.ok) {
+    const e = friendlyGoogleError(null, res, body);
+    recordFailure(sheet, e);
+    throw e;
+  }
+  recordSuccess(sheet);
   return body;
 }
 
+/** Run a fetch once even if several callers ask at the same time. */
+function once(key, fn) {
+  if (inFlight.has(key)) return inFlight.get(key);
+  const p = Promise.resolve().then(fn).finally(() => inFlight.delete(key));
+  inFlight.set(key, p);
+  return p;
+}
+
+/**
+ * Serve key from cache. Fresh: return it. Old but present: return it now and
+ * refresh in the background. Missing: wait for Google (unless we're in a
+ * retry pause after errors, in which case report the last error).
+ */
+async function cached(sheet, key, fetcher, maxAgeMs) {
+  const full = `${sheet.id}|${key}`;
+  const entry = cache.get(full);
+  if (isFresh(sheet, entry, maxAgeMs)) return entry.data;
+
+  const refresh = () => once(full, async () => {
+    const data = await fetcher();
+    cache.set(full, { time: Date.now(), data });
+    return data;
+  });
+
+  if (entry?.data !== undefined) {
+    if (mayCallGoogle(sheet)) refresh().catch(() => {}); // failure is recorded in health
+    return entry.data;
+  }
+  if (!mayCallGoogle(sheet) && healthOf(sheet).lastError) throw healthOf(sheet).lastError;
+  return refresh();
+}
+
+const tabsKey = 'tabs|';
+const a1For = (tabName, range) => `'${tabName.replace(/'/g, "''")}'${range ? '!' + range : ''}`;
+const valuesKey = (a1, render) => `values|${a1}|${render}`;
+
+async function fetchTabs(sheet) {
+  const data = await googleGet(sheet, `/spreadsheets/${encodeURIComponent(sheet.spreadsheetId)}`, {
+    fields: 'properties.title,sheets.properties(sheetId,title,index,gridProperties)',
+  });
+  return {
+    title: data.properties?.title || '',
+    tabs: (data.sheets || []).map((s) => ({
+      name: s.properties.title,
+      index: s.properties.index,
+      gid: s.properties.sheetId,
+      rows: s.properties.gridProperties?.rowCount,
+      columns: s.properties.gridProperties?.columnCount,
+    })),
+  };
+}
+
 function getTabs(sheet) {
-  const id = sheet.spreadsheetId;
-  return cached(sheet, 'tabs|', async () => {
-    const data = await googleGet(keyFor(sheet), `/spreadsheets/${encodeURIComponent(id)}`, {
-      fields: 'properties.title,sheets.properties(sheetId,title,index,gridProperties)',
-    });
-    return {
-      title: data.properties?.title || '',
-      tabs: (data.sheets || []).map((s) => ({
-        name: s.properties.title,
-        index: s.properties.index,
-        gid: s.properties.sheetId,
-        rows: s.properties.gridProperties?.rowCount,
-        columns: s.properties.gridProperties?.columnCount,
-      })),
-    };
+  return cached(sheet, tabsKey, () => fetchTabs(sheet), Math.max(TABS_REFRESH_MS, ttlMs(sheet)));
+}
+
+/** Re-read the tab list now (keeps the old list if Google fails). */
+function refreshTabs(sheet) {
+  const full = `${sheet.id}|${tabsKey}`;
+  return once(full, async () => {
+    const data = await fetchTabs(sheet);
+    cache.set(full, { time: Date.now(), data });
+    return data;
   });
 }
 
 function getValues(sheet, tabName, range, render) {
-  const id = sheet.spreadsheetId;
-  const a1 = `'${tabName.replace(/'/g, "''")}'${range ? '!' + range : ''}`;
-  return cached(sheet, `values|${a1}|${render}`, async () => {
+  const a1 = a1For(tabName, range);
+  return cached(sheet, valuesKey(a1, render), async () => {
     const data = await googleGet(
-      keyFor(sheet),
-      `/spreadsheets/${encodeURIComponent(id)}/values/${encodeURIComponent(a1)}`,
+      sheet,
+      `/spreadsheets/${encodeURIComponent(sheet.spreadsheetId)}/values/${encodeURIComponent(a1)}`,
       { valueRenderOption: render, majorDimension: 'ROWS' },
     );
     return data.values || [];
   });
 }
+
+/**
+ * Fetch every tab's cells in one batchGet call and store each tab in the
+ * per-tab cache the single-tab endpoints use, so /all and /sheet/... always
+ * serve the same snapshot.
+ */
+function fetchAllValues(sheet, tabs, render) {
+  return once(`${sheet.id}|batch|${render}`, async () => {
+    if (!tabs.length) return;
+    const data = await googleGet(sheet, `/spreadsheets/${encodeURIComponent(sheet.spreadsheetId)}/values:batchGet`, {
+      ranges: tabs.map((t) => a1For(t.name, '')),
+      valueRenderOption: render,
+      majorDimension: 'ROWS',
+    });
+    const now = Date.now();
+    tabs.forEach((t, i) => {
+      cache.set(`${sheet.id}|${valuesKey(a1For(t.name, ''), render)}`, { time: now, data: data.valueRanges?.[i]?.values || [] });
+    });
+  });
+}
+
+/** Cell values for every tab of a sheet, as { tabName: values[][] }. */
+async function getAllValues(sheet, render) {
+  const { tabs } = await getTabs(sheet);
+  const entryOf = (t) => cache.get(`${sheet.id}|${valuesKey(a1For(t.name, ''), render)}`);
+  const haveAll = tabs.every((t) => entryOf(t)?.data !== undefined);
+  const allFresh = haveAll && tabs.every((t) => isFresh(sheet, entryOf(t)));
+
+  if (!allFresh) {
+    if (haveAll) {
+      // Serve what we have; refresh in the background.
+      if (mayCallGoogle(sheet)) fetchAllValues(sheet, tabs, render).catch(() => {});
+    } else {
+      if (!mayCallGoogle(sheet) && healthOf(sheet).lastError) throw healthOf(sheet).lastError;
+      await fetchAllValues(sheet, tabs, render);
+    }
+  }
+
+  const out = {};
+  for (const t of tabs) out[t.name] = entryOf(t)?.data ?? [];
+  return out;
+}
+
+// ---- background poller --------------------------------------------------------
+const pollTimers = new Map(); // sheet id -> timeout
+
+/**
+ * One poll: refresh the tab list when it's due, then read every tab in one call.
+ * force = true re-reads the tab list too (used by the Check button).
+ */
+async function pollSheet(sheet, { force = false } = {}) {
+  const tabsEntry = cache.get(`${sheet.id}|${tabsKey}`);
+  let tabsData = tabsEntry?.data;
+  if (force || !tabsData || Date.now() - tabsEntry.time > TABS_REFRESH_MS) {
+    tabsData = await refreshTabs(sheet);
+  }
+  try {
+    await fetchAllValues(sheet, tabsData.tabs, 'FORMATTED_VALUE');
+  } catch (err) {
+    // A tab was probably renamed or deleted: re-read the tab list and try once more.
+    if (err.googleStatus === 400 && /parse range/i.test(err.detail || '')) {
+      tabsData = await refreshTabs(sheet);
+      await fetchAllValues(sheet, tabsData.tabs, 'FORMATTED_VALUE');
+    } else {
+      throw err;
+    }
+  }
+}
+
+function stopPoller(sheet) {
+  clearTimeout(pollTimers.get(sheet.id));
+  pollTimers.delete(sheet.id);
+}
+
+/** (Re)start polling a sheet. Called at startup and whenever its settings change. */
+function startPoller(sheet, delayMs = 0) {
+  stopPoller(sheet);
+  if (sheet.refresh === false || !config.sheets.includes(sheet)) return;
+  const timer = setTimeout(async () => {
+    let next = ttlMs(sheet);
+    try {
+      await pollSheet(sheet);
+    } catch (err) {
+      // Usually a Google failure, already recorded in health. Wait a moment and
+      // try again (2s, 4s, 8s ... 30s); never give up.
+      if (!err?.kind) console.error(`[${sheet.slug}] poll error: ${err?.stack || err}`);
+      next = retryDelayMs(Math.max(1, healthOf(sheet).consecutiveFailures));
+    } finally {
+      if (pollTimers.get(sheet.id) === timer) startPoller(sheet, next);
+    }
+  }, delayMs);
+  timer.unref?.();
+  pollTimers.set(sheet.id, timer);
+}
+
+// ---- suggestions -------------------------------------------------------------
+
+/** Rough Google read requests per minute that the pollers make. */
+function estimatedReadsPerMinute() {
+  let total = 0;
+  for (const s of config.sheets) {
+    if (s.refresh === false) continue;
+    total += 60000 / ttlMs(s) + 60000 / Math.max(TABS_REFRESH_MS, ttlMs(s));
+  }
+  return Math.round(total);
+}
+
+/** A cache-time suggestion when a sheet keeps failing, or null. */
+function suggestionFor(sheet) {
+  const h = healthOf(sheet);
+  const now = Date.now();
+  const recent = h.recentErrors.filter((e) => now - e.at < ERROR_WINDOW_MS && e.at > h.cacheChangedAt);
+  if (recent.length < 3 || sheet.refresh === false) return null;
+  // Problems a longer cache time won't fix.
+  if (recent.every((e) => e.kind === 'config')) return null;
+
+  const current = sheet.cacheSeconds ?? DEFAULT_CACHE_SECONDS;
+  const quota = recent.some((e) => e.kind === 'quota');
+  let suggested = Math.min(300, Math.max(10, Math.ceil(current * 2)));
+  if (quota) {
+    // Bring the total for all sheets comfortably under the quota.
+    const total = estimatedReadsPerMinute();
+    const target = QUOTA_PER_MINUTE * 0.6;
+    if (total > target) suggested = Math.max(suggested, Math.ceil(current * (total / target)));
+  }
+  if (suggested <= current) return null;
+  return {
+    cacheSeconds: suggested,
+    reason: quota
+      ? `Google rejected requests for going over its limit ${recent.length} times in the last 10 minutes.`
+      : `Google failed ${recent.length} times in the last 10 minutes.`,
+    message: `${quota ? 'Google keeps rejecting requests for going over its limit.' : 'Google has failed several times in the last 10 minutes.'} `
+      + `Raise the cache time from ${current}s to ${suggested}s to ask Google less often. vMix keeps getting the last good data in between.`,
+  };
+}
+
+/** Everything the interface needs about one sheet's connection, without calling Google. */
+function sheetHealth(sheet) {
+  const h = healthOf(sheet);
+  const now = Date.now();
+  const tabs = cache.get(`${sheet.id}|${tabsKey}`)?.data || null;
+  const updated = dataUpdatedAt(sheet);
+  const failing = h.consecutiveFailures > 0;
+  const iso = (t) => (t ? new Date(t).toISOString() : null);
+  return {
+    state: !h.lastSuccessAt && !failing ? 'starting' : failing ? (updated ? 'stale' : 'error') : 'ok',
+    title: tabs?.title || '',
+    tabs: tabs?.tabs || null,
+    dataUpdatedAt: updated,
+    lastSuccessAt: iso(h.lastSuccessAt),
+    lastErrorAt: iso(h.lastErrorAt),
+    lastError: h.lastError ? h.lastError.message : null,
+    // Google's own wording, only when Google actually answered (not for timeouts/network errors).
+    lastErrorDetail: h.lastError?.googleStatus ? h.lastError.detail || null : null,
+    consecutiveFailures: h.consecutiveFailures,
+    errorsLast10Min: h.recentErrors.filter((e) => now - e.at < ERROR_WINDOW_MS).length,
+    nextRetryAt: failing ? iso(h.nextRetryAt) : null,
+    suggestion: suggestionFor(sheet),
+  };
+}
+
+/** Shape every tab of a sheet for vMix: { tabName: [row objects] }. */
+async function allTabsData(sheet, q) {
+  const render = renderOption(q);
+  const values = await getAllValues(sheet, render);
+  if (q.has('raw')) return values;
+  const out = {};
+  for (const [name, v] of Object.entries(values)) {
+    let rows = rowsToObjects(v, { skipEmpty: q.get('empty') !== '1', vmixKeys: q.get('keys') !== 'original' });
+    if (q.has('limit')) rows = rows.slice(0, Math.max(0, Number(q.get('limit')) || 0));
+    out[name] = rows;
+  }
+  return out;
+}
+
+/**
+ * Merge every tab's rows into one array for vMix. Each row starts with
+ * Sheet (only on /all), Tab and Row (1-based position within its tab, the same
+ * number /sheet/<sheet>/<tab>/<n> uses), followed by the union of all columns
+ * so every row has the same keys. Columns whose names differ only in case
+ * ("Date" in one tab, "DATE" in another) are merged, because vMix treats them
+ * as the same column. A sheet column that clashes with Sheet/Tab/Row gets a
+ * _2 suffix.
+ */
+function flattenForVmix(results, { includeSheet }) {
+  const meta = includeSheet ? ['Sheet', 'Tab', 'Row'] : ['Tab', 'Row'];
+  const metaLower = meta.map((m) => m.toLowerCase());
+  const canonical = new Map(); // lower-case name -> the spelling first seen
+  const columns = [];
+  const rename = (k) => {
+    let name = k;
+    for (let i = 2; metaLower.includes(name.toLowerCase()); i++) name = `${k}_${i}`;
+    const lower = name.toLowerCase();
+    if (!canonical.has(lower)) {
+      canonical.set(lower, name);
+      columns.push(name);
+    }
+    return canonical.get(lower);
+  };
+  const rows = [];
+  for (const { sheet, tabs } of results) {
+    for (const [tab, tabRows] of Object.entries(tabs)) {
+      tabRows.forEach((r, i) => {
+        const row = includeSheet ? { Sheet: sheet.slug, Tab: tab, Row: String(i + 1) } : { Tab: tab, Row: String(i + 1) };
+        for (const [k, v] of Object.entries(r)) {
+          const name = rename(k);
+          // Two differently-cased columns in the same tab: keep the first non-empty value.
+          if (row[name] === undefined || row[name] === '') row[name] = v;
+        }
+        rows.push(row);
+      });
+    }
+  }
+  return rows.map((r) => {
+    const full = {};
+    for (const m of meta) full[m] = r[m];
+    for (const c of columns) full[c] = r[c] ?? '';
+    return full;
+  });
+}
+
+const renderOption = (q) => (q.get('render') === 'unformatted' ? 'UNFORMATTED_VALUE'
+  : q.get('render') === 'formula' ? 'FORMULA' : 'FORMATTED_VALUE');
 
 /** Find a tab by exact name, case-insensitive name, then numeric index. */
 async function resolveTab(sheet, requested) {
@@ -234,8 +618,35 @@ async function resolveTab(sheet, requested) {
 // Shaping rows for vMix
 // ---------------------------------------------------------------------------
 
-/** Turn a 2D array into [{Header: value, ...}, ...] with consistent keys. */
-function rowsToObjects(values, { skipEmpty = true } = {}) {
+/**
+ * Make a column name vMix can use. vMix reads JSON through XML, so a name with
+ * spaces, #, /, |, brackets, line breaks etc. is renamed to "a:item" and all but
+ * the first such column are dropped. Only letters, digits and _ are kept:
+ * "Start Time" -> "Start_Time", "SESSION #" -> "SESSION_Number",
+ * "DURATION\nhh:mm:ss" -> "DURATION_hh_mm_ss". Returns '' if nothing is left.
+ */
+const TRANSLIT = { þ: 'th', Þ: 'Th', ð: 'd', Ð: 'D', æ: 'ae', Æ: 'Ae', ø: 'o', Ø: 'O', ß: 'ss', œ: 'oe', Œ: 'Oe', ł: 'l', Ł: 'L' };
+
+function vmixName(name) {
+  let k = String(name)
+    .replace(/[þÞðÐæÆøØßœŒłŁ]/g, (c) => TRANSLIT[c])
+    .normalize('NFKD').replace(/[\u0300-\u036f]/g, '') // á -> a, ö -> o
+    .replace(/#/g, ' Number ')
+    .replace(/&/g, ' and ')
+    .replace(/%/g, ' Percent ')
+    .replace(/[^A-Za-z0-9_]+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  if (/^[0-9]/.test(k)) k = `_${k}`; // names can't start with a digit
+  return k;
+}
+
+/**
+ * Turn a 2D array into [{Header: value, ...}, ...] with consistent keys.
+ * vmixKeys (default): make the names vMix-safe and unique ignoring case, because
+ * vMix treats "Name" and "NAME" as the same column.
+ */
+function rowsToObjects(values, { skipEmpty = true, vmixKeys = true } = {}) {
   if (values.length === 0) return [];
   const [headerRow, ...rows] = values;
   const width = Math.max(headerRow.length, ...rows.map((r) => r.length));
@@ -243,9 +654,11 @@ function rowsToObjects(values, { skipEmpty = true } = {}) {
   const seen = new Map();
   const headers = [];
   for (let i = 0; i < width; i++) {
-    let h = String(headerRow[i] ?? '').trim() || columnLetter(i);
-    const count = seen.get(h) || 0;
-    seen.set(h, count + 1);
+    const raw = String(headerRow[i] ?? '').trim();
+    let h = (vmixKeys ? vmixName(raw) : raw) || columnLetter(i);
+    const id = vmixKeys ? h.toLowerCase() : h;
+    const count = seen.get(id) || 0;
+    seen.set(id, count + 1);
     if (count > 0) h = `${h}_${count + 1}`;
     headers.push(h);
   }
@@ -267,12 +680,10 @@ function columnLetter(i) {
 
 async function tabData(sheet, tabName, rowParam, q) {
   const tab = await resolveTab(sheet, tabName);
-  const render = q.get('render') === 'unformatted' ? 'UNFORMATTED_VALUE'
-    : q.get('render') === 'formula' ? 'FORMULA' : 'FORMATTED_VALUE';
-  const values = await getValues(sheet, tab.name, q.get('range') || '', render);
+  const values = await getValues(sheet, tab.name, q.get('range') || '', renderOption(q));
   if (q.has('raw')) return values;
 
-  let rows = rowsToObjects(values, { skipEmpty: q.get('empty') !== '1' });
+  let rows = rowsToObjects(values, { skipEmpty: q.get('empty') !== '1', vmixKeys: q.get('keys') !== 'original' });
   rowParam = rowParam ?? q.get('row');
   if (rowParam !== undefined && rowParam !== null) {
     const n = Number(rowParam);
@@ -286,17 +697,28 @@ async function tabData(sheet, tabName, rowParam, q) {
 // ---------------------------------------------------------------------------
 // Admin API (used by the web interface)
 // ---------------------------------------------------------------------------
-function publicConfig() {
+function publicSheet(s) {
   return {
-    sheets: config.sheets.map((s) => ({
-      slug: s.slug,
-      name: s.name,
-      spreadsheetId: s.spreadsheetId,
-      apiKeySet: Boolean(s.apiKey),
-      apiKeyMasked: maskKey(s.apiKey),
-      cacheSeconds: s.cacheSeconds,
-      refresh: s.refresh !== false,
-    })),
+    slug: s.slug,
+    name: s.name,
+    spreadsheetId: s.spreadsheetId,
+    apiKeySet: Boolean(s.apiKey),
+    apiKeyMasked: maskKey(s.apiKey),
+    cacheSeconds: s.cacheSeconds,
+    refresh: s.refresh !== false,
+  };
+}
+
+function publicConfig() {
+  return { sheets: config.sheets.map(publicSheet) };
+}
+
+/** Config plus live connection health for every sheet. Never calls Google. */
+function publicState() {
+  return {
+    sheets: config.sheets.map((s) => ({ ...publicSheet(s), health: sheetHealth(s) })),
+    usage: { readsPerMinute: estimatedReadsPerMinute(), quotaPerMinute: QUOTA_PER_MINUTE },
+    serverTime: new Date().toISOString(),
   };
 }
 
@@ -331,6 +753,9 @@ async function handleAdmin(req, res, parts) {
   // GET /api/config
   if (parts[1] === 'config' && method === 'GET') return sendJson(res, 200, publicConfig());
 
+  // GET /api/state — config + health; the interface polls this every few seconds
+  if (parts[1] === 'state' && method === 'GET') return sendJson(res, 200, publicState());
+
   if (parts[1] === 'sheets') {
     // POST /api/sheets  { name, spreadsheetId, apiKey, slug?, cacheSeconds?, refresh? }
     if (parts.length === 2 && method === 'POST') {
@@ -340,30 +765,37 @@ async function handleAdmin(req, res, parts) {
       const sheet = { id: newId(), slug: uniqueSlug(body.slug || fields.name), ...fields, apiKey };
       config.sheets.push(sheet);
       saveConfig();
-      return sendJson(res, 201, { ...publicConfig(), saved: sheet.slug });
+      if (sheet.refresh) startPoller(sheet);
+      else refreshTabs(sheet).catch(() => {}); // paused: still show its tabs
+      return sendJson(res, 201, { ...publicState(), saved: sheet.slug });
     }
 
     const sheet = findSheet(parts[2]);
 
-    // GET /api/sheets/:slug/status — test the connection and list tabs.
-    // Only the tab list is re-fetched; cell data (and a paused sheet's frozen data) is untouched.
-    if (parts[3] === 'status' && method === 'GET') {
-      clearCache(sheet, 'tabs');
+    // POST /api/sheets/:slug/check — try Google right now (the Check button).
+    // Live sheet: a full poll. Paused sheet: only the tab list, so its held data is untouched.
+    // Errors are reported in the returned health, never as a failed request.
+    if (parts[3] === 'check' && method === 'POST') {
       try {
-        return sendJson(res, 200, { ok: true, ...(await getTabs(sheet)), dataUpdatedAt: dataUpdatedAt(sheet) });
-      } catch (err) {
-        return sendJson(res, 200, { ok: false, error: err.message, dataUpdatedAt: dataUpdatedAt(sheet) });
+        if (sheet.refresh) await pollSheet(sheet, { force: true });
+        else await refreshTabs(sheet);
+      } catch {
+        // recorded in health
       }
+      if (sheet.refresh) startPoller(sheet, healthOf(sheet).consecutiveFailures ? retryDelayMs(healthOf(sheet).consecutiveFailures) : ttlMs(sheet));
+      return sendJson(res, 200, { ...publicSheet(sheet), health: sheetHealth(sheet) });
     }
 
-    // POST /api/sheets/:slug/reload — drop cached data so the next request fetches fresh
-    // data from Google. For a paused sheet this updates its frozen snapshot once.
+    // POST /api/sheets/:slug/reload — fetch every tab from Google now (Fetch latest once).
+    // For a paused sheet this replaces its held data once. If Google fails, the
+    // old data is kept and the error is returned.
     if (parts[3] === 'reload' && method === 'POST') {
-      clearCache(sheet);
-      // Pre-fetch every tab in the default format so the snapshot is updated right away.
-      const { tabs } = await getTabs(sheet);
-      await Promise.all(tabs.map((t) => getValues(sheet, t.name, '', 'FORMATTED_VALUE')));
-      return sendJson(res, 200, { ok: true, dataUpdatedAt: dataUpdatedAt(sheet) });
+      const tabsData = await refreshTabs(sheet);
+      await fetchAllValues(sheet, tabsData.tabs, 'FORMATTED_VALUE');
+      // Other ranges/formats (?range=, ?render=) are re-read on their next request.
+      const keep = new Set(tabsData.tabs.map((t) => `${sheet.id}|${valuesKey(a1For(t.name, ''), 'FORMATTED_VALUE')}`));
+      for (const k of cache.keys()) if (k.startsWith(`${sheet.id}|values|`) && !keep.has(k)) cache.delete(k);
+      return sendJson(res, 200, { ...publicSheet(sheet), health: sheetHealth(sheet) });
     }
 
     // PUT /api/sheets/:slug  { name?, spreadsheetId?, slug?, apiKey?, cacheSeconds?, refresh? }
@@ -371,21 +803,37 @@ async function handleAdmin(req, res, parts) {
     if (parts.length === 3 && method === 'PUT') {
       const fields = validateSheetInput(body, sheet);
       const newKey = String(body.apiKey ?? '').trim();
-      // Only throw away cached data when the source itself changes.
-      if (fields.spreadsheetId !== sheet.spreadsheetId || (newKey && newKey !== sheet.apiKey)) clearCache(sheet);
+      // Only throw away cached data (and the error history) when the source itself changes.
+      const sourceChanged = fields.spreadsheetId !== sheet.spreadsheetId || (newKey && newKey !== sheet.apiKey);
+      const resumed = sheet.refresh === false && fields.refresh;
+      if (fields.cacheSeconds !== sheet.cacheSeconds) healthOf(sheet).cacheChangedAt = Date.now();
+      if (sourceChanged) {
+        clearCache(sheet);
+        health.delete(sheet.id);
+      }
       Object.assign(sheet, fields);
       if (body.slug && slugify(body.slug) !== sheet.slug) sheet.slug = uniqueSlug(body.slug, sheet.slug);
       if (newKey) sheet.apiKey = newKey;
       saveConfig();
-      return sendJson(res, 200, { ...publicConfig(), saved: sheet.slug });
+      if (sheet.refresh) {
+        // Poll now if the source changed or the sheet was just resumed; otherwise keep the rhythm.
+        const entry = cache.get(`${sheet.id}|${tabsKey}`);
+        startPoller(sheet, sourceChanged || resumed || !entry ? 0 : ttlMs(sheet));
+      } else {
+        stopPoller(sheet);
+        if (sourceChanged) refreshTabs(sheet).catch(() => {});
+      }
+      return sendJson(res, 200, { ...publicState(), saved: sheet.slug });
     }
 
     // DELETE /api/sheets/:slug
     if (parts.length === 3 && method === 'DELETE') {
       config.sheets = config.sheets.filter((s) => s !== sheet);
+      stopPoller(sheet);
       clearCache(sheet);
+      health.delete(sheet.id);
       saveConfig();
-      return sendJson(res, 200, publicConfig());
+      return sendJson(res, 200, publicState());
     }
   }
 
@@ -461,6 +909,38 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, config.sheets.map((s) => ({ slug: s.slug, name: s.name })));
     }
 
+    // GET /all          -> every tab of every sheet
+    // GET /all/:slug    -> every tab of one sheet
+    // vMix only accepts an array of row objects at the top level, so by default every
+    // row is returned in one flat array with Sheet/Tab/Row columns added.
+    // ?format=object returns the grouped shape { sheet: { tab: [rows] } } instead.
+    if (parts[0] === 'all' && parts.length <= 2) {
+      const grouped = q.get('format') === 'object' || q.has('raw');
+      const sheets = parts.length === 2 ? [findSheet(parts[1])] : config.sheets;
+      const results = await Promise.all(sheets.map(async (s) => {
+        try {
+          return { sheet: s, tabs: await allTabsData(s, q) };
+        } catch (err) {
+          if (parts.length === 2) throw err; // a single requested sheet: report the error
+          console.error(`/all: ${s.slug}: ${err.message}`);
+          return { sheet: s, tabs: {}, error: err.message };
+        }
+      }));
+
+      if (grouped) {
+        if (parts.length === 2) return sendJson(res, 200, results[0].tabs);
+        const out = {};
+        const errors = {};
+        for (const r of results) {
+          out[r.sheet.slug] = r.tabs;
+          if (r.error) errors[r.sheet.slug] = r.error;
+        }
+        if (Object.keys(errors).length) out._errors = errors;
+        return sendJson(res, 200, out);
+      }
+      return sendJson(res, 200, flattenForVmix(results, { includeSheet: parts.length === 1 }));
+    }
+
     // GET /sheet/:slug                  -> tabs of that sheet
     // GET /sheet/:slug/:tab             -> rows of a tab (vMix format)
     // GET /sheet/:slug/:tab/:row        -> single row, still wrapped in an array
@@ -478,7 +958,7 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, await tabData(defaultSheet(q), parts[1], parts[2], q));
     }
 
-    return sendJson(res, 404, { error: 'Not found. Try / , /sheets or /sheet/<sheet>/<tab>' });
+    return sendJson(res, 404, { error: 'Not found. Try / , /all, /sheets or /sheet/<sheet>/<tab>' });
   } catch (err) {
     if (err.status !== 404) console.error(`${req.method} ${req.url} -> ${err.message}`);
     return sendJson(res, err.status || 500, { error: err.message });
@@ -510,4 +990,13 @@ server.listen(env.port, env.host, () => {
   console.log(`Config: ${env.configFile} | ${config.sheets.length} sheet(s)`);
   const missing = config.sheets.filter((s) => !s.apiKey).map((s) => s.slug);
   if (missing.length) console.log(`Sheets without an API key: ${missing.join(', ')} — add one in the web interface.`);
+  // Start polling every live sheet, staggered so they don't all hit Google at once.
+  config.sheets.forEach((s, i) => {
+    if (s.refresh) startPoller(s, i * 300);
+    else refreshTabs(s).catch(() => {}); // paused: load the tab list so the interface can show it
+  });
 });
+
+// A bug in one request must never take the proxy (and every vMix input) down.
+process.on('uncaughtException', (err) => console.error('Unexpected error:', err));
+process.on('unhandledRejection', (err) => console.error('Unexpected error:', err));
