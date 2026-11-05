@@ -2,6 +2,11 @@
 
 Connect one or more Google spreadsheets and serve every sheet in them as its own JSON endpoint, in the shape vMix Data Sources expects: an array of row objects, with the sheet's first row used as column names. You add and manage spreadsheets in a web interface.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshot-dark.png">
+  <img alt="The web interface: three connected spreadsheets, one expanded to show its sheets and their JSON URLs" src="docs/screenshot-light.png" width="900">
+</picture>
+
 This README uses Google's terms: a **spreadsheet** is the whole file, and a **sheet** is one of the tabs inside it.
 
 No dependencies. You need Node.js 18 or newer.
