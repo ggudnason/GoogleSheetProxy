@@ -28,6 +28,7 @@ Sheets and their settings, including API keys, are saved in `config.json`. Keep 
   - its own Google API key. The key is required when you add a sheet and is shown masked once saved. When editing, leave the key field blank to keep the saved key.
   - a **cache time** in seconds (5 by default): how often the proxy re-reads the sheet from Google
   - an **Auto refresh** switch
+  - a **Show hidden tabs** switch (off by default): whether tabs hidden in Google Sheets are included in `/all`
 - Each sheet card has an **Auto refresh** switch, so you can pause and resume without opening the edit dialog:
   - **Live:** the proxy re-reads the sheet from Google every cache period in the background, whether or not vMix is asking.
   - **Paused:** vMix keeps receiving the last fetched data, and Google is not called. Use this to lock graphics while someone edits the sheet. **Fetch latest once** updates the held data a single time without turning live refresh back on.
@@ -50,6 +51,7 @@ The proxy is built so that a Google problem never blanks your graphics or stops 
   - A yellow notice means Google isn't answering but vMix still has data. It says what's wrong, how old the data vMix is getting is, and when the next try is.
   - A red notice means there's no data yet for vMix (for example a new sheet with a wrong API key). vMix gets an error for that sheet until it works.
   - After recovery, a smaller note shows how many errors there were in the last 10 minutes.
+  - **Clear** on any of these notes resets the error counter, so the 10-minute count and any cache time suggestion start over. After recovery it also hides the note. While Google is still failing, it resets the retry wait and tries again right away. The error stays shown until a try succeeds.
 - **Messages you may see:** Google not responding within 10 seconds, no internet connection, the connection being cut off, Google's request limit being reached, an invalid API key, access being refused (sheet not shared or Sheets API not enabled), the spreadsheet not being found, or a temporary Google server problem. When Google gave its own explanation, it's shown underneath.
 - **Cache time suggestions:** if Google fails 3 or more times in 10 minutes, the card suggests a longer cache time with a one-click **Use Ns** button. A longer cache time means fewer requests, which is the fix for "request limit reached" errors and makes the proxy ask less often during unreliable connections. Suggestions only count errors since the cache time was last changed. No suggestion is shown for errors a cache time can't fix, such as a wrong API key.
 - **Check** tries Google right away instead of waiting for the next retry. On a paused sheet it only re-reads the tab list, so the held data stays as it is.
@@ -88,7 +90,7 @@ The combined array has every column from every tab. A row gets an empty value fo
 
 Add `?format=object` to get the grouped shape instead: `{ "<sheet>": { "<tab>": [rows] } }` on `/all`, or `{ "<tab>": [rows] }` on `/all/<sheet>`. This is useful for other tools, but vMix can't read it.
 
-Tabs hidden in Google Sheets are left out of `/all` and aren't polled in the background. In the interface they're listed last, dimmed, with a **Hidden** label. A hidden tab's own URL still works. In the Sheets UI, hiding a tab looks a lot like deleting it, so if a tab you removed still shows up, it's probably hidden. Unhide it from Google Sheets' *View → Hidden sheets* menu, or delete it for real.
+By default, tabs hidden in Google Sheets are left out of `/all` and aren't polled in the background. In the interface they're listed last, dimmed, with a **Hidden** label. A hidden tab's own URL still works. To include hidden tabs in `/all`, turn on **Show hidden tabs** for that sheet. The switch appears on the sheet's card when it has hidden tabs, and is also in the edit dialog. In the Sheets UI, hiding a tab looks a lot like deleting it, so if a tab you removed still shows up, it's probably hidden. Unhide it from Google Sheets' *View → Hidden sheets* menu, or delete it for real.
 
 On `/all`, a sheet that fails to load (wrong key, missing spreadsheet) is left out, and the other sheets still come through. With `?format=object`, the reason is listed under `_errors`.
 

@@ -356,11 +356,12 @@ async function fetchTabs(sheet) {
 }
 
 /**
- * Tabs hidden in Google Sheets are left out of /all and the background poll.
- * Hiding a tab looks like deleting it in the Sheets UI, so it shouldn't keep
- * feeding vMix. A hidden tab's own URL still works (read on demand).
+ * The tabs /all serves and the poller reads. Tabs hidden in Google Sheets are
+ * left out unless the sheet's "Show hidden tabs" setting is on: hiding a tab
+ * looks like deleting it in the Sheets UI, so by default it shouldn't keep
+ * feeding vMix. A hidden tab's own URL always works (read on demand).
  */
-const visibleTabs = (tabs) => tabs.filter((t) => !t.hidden);
+const servedTabs = (sheet, tabs) => (sheet.showHidden ? tabs : tabs.filter((t) => !t.hidden));
 
 function getTabs(sheet) {
   return cached(sheet, tabsKey, () => fetchTabs(sheet), Math.max(TABS_REFRESH_MS, ttlMs(sheet)));
@@ -410,7 +411,7 @@ function fetchAllValues(sheet, tabs, render) {
 
 /** Cell values for every tab of a sheet, as { tabName: values[][] }. */
 async function getAllValues(sheet, render) {
-  const tabs = visibleTabs((await getTabs(sheet)).tabs);
+  const tabs = servedTabs(sheet, (await getTabs(sheet)).tabs);
   const entryOf = (t) => cache.get(`${sheet.id}|${valuesKey(a1For(t.name, ''), render)}`);
   const haveAll = tabs.every((t) => entryOf(t)?.data !== undefined);
   const allFresh = haveAll && tabs.every((t) => isFresh(sheet, entryOf(t)));
@@ -444,12 +445,12 @@ async function pollSheet(sheet, { force = false } = {}) {
     tabsData = await refreshTabs(sheet);
   }
   try {
-    await fetchAllValues(sheet, visibleTabs(tabsData.tabs), 'FORMATTED_VALUE');
+    await fetchAllValues(sheet, servedTabs(sheet, tabsData.tabs), 'FORMATTED_VALUE');
   } catch (err) {
     // A tab was probably renamed or deleted: re-read the tab list and try once more.
     if (err.googleStatus === 400 && /parse range/i.test(err.detail || '')) {
       tabsData = await refreshTabs(sheet);
-      await fetchAllValues(sheet, visibleTabs(tabsData.tabs), 'FORMATTED_VALUE');
+      await fetchAllValues(sheet, servedTabs(sheet, tabsData.tabs), 'FORMATTED_VALUE');
     } else {
       throw err;
     }
@@ -714,6 +715,7 @@ function publicSheet(s) {
     apiKeyMasked: maskKey(s.apiKey),
     cacheSeconds: s.cacheSeconds,
     refresh: s.refresh !== false,
+    showHidden: s.showHidden === true,
   };
 }
 
@@ -751,7 +753,8 @@ function validateSheetInput(body, existing) {
     }
   }
   const refresh = body.refresh === undefined ? existing?.refresh !== false : Boolean(body.refresh);
-  return { name, spreadsheetId, cacheSeconds, refresh };
+  const showHidden = body.showHidden === undefined ? existing?.showHidden === true : Boolean(body.showHidden);
+  return { name, spreadsheetId, cacheSeconds, refresh, showHidden };
 }
 
 async function handleAdmin(req, res, parts) {
@@ -794,14 +797,32 @@ async function handleAdmin(req, res, parts) {
       return sendJson(res, 200, { ...publicSheet(sheet), health: sheetHealth(sheet) });
     }
 
+    // POST /api/sheets/:slug/clear-errors — forget the error history (the Clear button).
+    // Resets the error counter, so the 10-minute count and any cache suggestion start
+    // over. If Google is failing right now, the retry wait is reset too and the sheet
+    // is tried again straight away; the error stays shown until that try succeeds.
+    if (parts[3] === 'clear-errors' && method === 'POST') {
+      const h = healthOf(sheet);
+      h.recentErrors = [];
+      if (h.consecutiveFailures > 0) {
+        h.consecutiveFailures = 1; // still failing, but the next wait starts short again
+        h.nextRetryAt = 0;
+        if (sheet.refresh) startPoller(sheet);
+      } else {
+        h.lastError = null;
+        h.lastErrorAt = 0;
+      }
+      return sendJson(res, 200, { ...publicSheet(sheet), health: sheetHealth(sheet) });
+    }
+
     // POST /api/sheets/:slug/reload — fetch every tab from Google now (Fetch latest once).
     // For a paused sheet this replaces its held data once. If Google fails, the
     // old data is kept and the error is returned.
     if (parts[3] === 'reload' && method === 'POST') {
       const tabsData = await refreshTabs(sheet);
-      await fetchAllValues(sheet, visibleTabs(tabsData.tabs), 'FORMATTED_VALUE');
+      await fetchAllValues(sheet, servedTabs(sheet, tabsData.tabs), 'FORMATTED_VALUE');
       // Other ranges/formats (?range=, ?render=) are re-read on their next request.
-      const keep = new Set(visibleTabs(tabsData.tabs).map((t) => `${sheet.id}|${valuesKey(a1For(t.name, ''), 'FORMATTED_VALUE')}`));
+      const keep = new Set(servedTabs(sheet, tabsData.tabs).map((t) => `${sheet.id}|${valuesKey(a1For(t.name, ''), 'FORMATTED_VALUE')}`));
       for (const k of cache.keys()) if (k.startsWith(`${sheet.id}|values|`) && !keep.has(k)) cache.delete(k);
       return sendJson(res, 200, { ...publicSheet(sheet), health: sheetHealth(sheet) });
     }
@@ -814,6 +835,7 @@ async function handleAdmin(req, res, parts) {
       // Only throw away cached data (and the error history) when the source itself changes.
       const sourceChanged = fields.spreadsheetId !== sheet.spreadsheetId || (newKey && newKey !== sheet.apiKey);
       const resumed = sheet.refresh === false && fields.refresh;
+      const hiddenChanged = fields.showHidden !== (sheet.showHidden === true);
       if (fields.cacheSeconds !== sheet.cacheSeconds) healthOf(sheet).cacheChangedAt = Date.now();
       if (sourceChanged) {
         clearCache(sheet);
@@ -826,7 +848,7 @@ async function handleAdmin(req, res, parts) {
       if (sheet.refresh) {
         // Poll now if the source changed or the sheet was just resumed; otherwise keep the rhythm.
         const entry = cache.get(`${sheet.id}|${tabsKey}`);
-        startPoller(sheet, sourceChanged || resumed || !entry ? 0 : ttlMs(sheet));
+        startPoller(sheet, sourceChanged || resumed || hiddenChanged || !entry ? 0 : ttlMs(sheet));
       } else {
         stopPoller(sheet);
         if (sourceChanged) refreshTabs(sheet).catch(() => {});

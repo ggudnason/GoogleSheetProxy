@@ -121,6 +121,9 @@
   .notice.err { background: var(--err-bg); color: var(--err); }
   .notice.info { background: var(--info-bg); color: var(--info); display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
   .notice.info span { flex: 1; min-width: 200px; }
+  .notice-area .notice { display: flex; gap: 10px; align-items: flex-start; }
+  .notice-area .notice > span { flex: 1; min-width: 0; }
+  .notice button.clear { flex: none; font-size: 12px; padding: 2px 10px; }
   .notice .detail { display: block; font-size: 12px; opacity: .8; margin-top: 2px; }
   .notice-area:empty { display: none; }
   .notice-area { border-bottom: 1px solid var(--line); }
@@ -195,6 +198,10 @@
       <label>Auto refresh
         <span class="switch-row"><input type="checkbox" name="refresh" class="switch"> <span id="refresh-label"></span></span>
         <span class="hint">When off, vMix keeps getting the last fetched data until you turn it back on.</span>
+      </label>
+      <label>Show hidden tabs
+        <span class="switch-row"><input type="checkbox" name="showHidden" class="switch"> <span id="hidden-label"></span></span>
+        <span class="hint">Include tabs hidden in Google Sheets in /all. Off by default.</span>
       </label>
     </div>
     <div id="sheet-error" class="error-box" hidden></div>
@@ -306,6 +313,11 @@ function tickAges() {
     if (el.textContent !== text) el.textContent = text;
     el.classList.toggle('old', old);
   }
+  for (const el of document.querySelectorAll('[data-retry-at]')) {
+    const sec = secondsUntil(el.dataset.retryAt);
+    const text = sec ? `Trying again in ${sec}s` : 'Trying again now…';
+    if (el.textContent !== text) el.textContent = text;
+  }
 }
 setInterval(tickAges, 1000);
 
@@ -316,7 +328,7 @@ function headHtml(s) {
   const title = h.title && h.title !== s.name ? ` <span class="muted small">(${esc(h.title)})</span>` : '';
   const pill = {
     starting: '<span class="pill">Connecting…</span>',
-    ok: h.tabs ? (() => { const n = h.tabs.filter((t) => !t.hidden).length; return `<span class="pill ok">${n} tab${n === 1 ? '' : 's'}</span>`; })() : '<span class="pill ok">OK</span>',
+    ok: h.tabs ? (() => { const n = h.tabs.filter((t) => s.showHidden || !t.hidden).length; return `<span class="pill ok">${n} tab${n === 1 ? '' : 's'}</span>`; })() : '<span class="pill ok">OK</span>',
     stale: '<span class="pill warn">Using last good data</span>',
     error: '<span class="pill err">Error</span>',
   }[h.state];
@@ -346,10 +358,16 @@ function headHtml(s) {
 }
 
 function toggleHtml(s) {
+  const hasHidden = (s.health.tabs || []).some((t) => t.hidden);
+  const hidden = hasHidden || s.showHidden
+    ? `<label class="switch-row" title="Include tabs that are hidden in Google Sheets in /all and polling">
+      <input type="checkbox" class="switch" data-show-hidden="${esc(s.slug)}" ${s.showHidden ? 'checked' : ''}>
+      Show hidden tabs
+    </label>` : '';
   return `<label class="switch-row" title="Turn off to freeze the data vMix receives">
       <input type="checkbox" class="switch" data-toggle="${esc(s.slug)}" ${s.refresh ? 'checked' : ''}>
       Auto refresh
-    </label>`;
+    </label>${hidden}`;
 }
 
 function infoHtml(s) {
@@ -365,18 +383,21 @@ function infoHtml(s) {
 function noticesHtml(s) {
   const h = s.health;
   const out = [];
+  // The countdown is filled in by tickAges(), so this HTML only changes when the
+  // situation does and the Clear button isn't redrawn under the mouse.
   const retry = h.nextRetryAt && s.refresh
-    ? ` Trying again in ${secondsUntil(h.nextRetryAt) || 'a moment'}${secondsUntil(h.nextRetryAt) ? 's' : ''} (attempt ${h.consecutiveFailures + 1}).`
+    ? ` <span data-retry-at="${esc(h.nextRetryAt)}"></span> (attempt ${h.consecutiveFailures + 1}).`
     : '';
+  const clear = `<button class="clear" data-clear="${esc(s.slug)}" title="Reset the error counter${h.state === 'ok' ? ' and hide this note' : ' and try Google again now'}">Clear</button>`;
   const detail = h.lastErrorDetail && h.lastErrorDetail !== h.lastError
     ? `<span class="detail">Google said: ${esc(h.lastErrorDetail)}</span>` : '';
 
   if (h.state === 'stale') {
-    out.push(`<div class="notice warn"><b>${esc(h.lastError)}</b> vMix keeps getting the data from ${fmtTime(h.dataUpdatedAt)}.${retry}${detail}</div>`);
+    out.push(`<div class="notice warn"><span><b>${esc(h.lastError)}</b> vMix keeps getting the data from ${fmtTime(h.dataUpdatedAt)}.${retry}${detail}</span>${clear}</div>`);
   } else if (h.state === 'error') {
-    out.push(`<div class="notice err"><b>${esc(h.lastError)}</b> vMix gets an error for this sheet until it works.${retry}${detail}</div>`);
+    out.push(`<div class="notice err"><span><b>${esc(h.lastError)}</b> vMix gets an error for this sheet until it works.${retry}${detail}</span>${clear}</div>`);
   } else if (h.errorsLast10Min > 0 && h.lastErrorAt) {
-    out.push(`<div class="notice warn small">Recovered. ${h.errorsLast10Min} error${h.errorsLast10Min === 1 ? '' : 's'} in the last 10 minutes; the last one at ${fmtTime(h.lastErrorAt)}: ${esc(h.lastError)}</div>`);
+    out.push(`<div class="notice warn small"><span>Recovered. ${h.errorsLast10Min} error${h.errorsLast10Min === 1 ? '' : 's'} in the last 10 minutes; the last one at ${fmtTime(h.lastErrorAt)}: ${esc(h.lastError)}</span>${clear}</div>`);
   }
   return out.join('');
 }
@@ -402,12 +423,15 @@ function bodyHtml(s) {
         <button class="link" data-copy="${esc(allUrl)}">Copy</button>
         <a class="btn link" href="${esc(allUrl)}" target="_blank" rel="noopener">Open</a>
       </td></tr>`;
-  // Visible tabs first; tabs hidden in Google Sheets are listed last, dimmed.
+  // Visible tabs first; tabs hidden in Google Sheets are listed last (dimmed unless shown).
   const ordered = [...h.tabs.filter((t) => !t.hidden), ...h.tabs.filter((t) => t.hidden)];
+  const hiddenTip = s.showHidden
+    ? 'Hidden in Google Sheets. Included in /all because Show hidden tabs is on.'
+    : "Hidden in Google Sheets. Left out of /all and not polled; its own URL still works. Turn on Show hidden tabs to include it.";
   return `<table class="tabs">${allRow}${ordered.map((t) => {
     const u = tabUrl(s.slug, t.name);
-    const hidden = t.hidden ? ` <span class="pill" title="This tab is hidden in Google Sheets. It's left out of /all and not polled; its own URL still works.">Hidden</span>` : '';
-    return `<tr${t.hidden ? ' class="hidden-tab"' : ''}>
+    const hidden = t.hidden ? ` <span class="pill" title="${esc(hiddenTip)}">Hidden</span>` : '';
+    return `<tr${t.hidden && !s.showHidden ? ' class="hidden-tab"' : ''}>
       <td class="name">${esc(t.name)}${hidden}</td>
       <td class="urlcell"><span class="url">${esc(u)}</span></td>
       <td class="actions">
@@ -551,6 +575,30 @@ async function setRefresh(slug, on, input) {
   input.disabled = false;
 }
 
+async function setShowHidden(slug, on, input) {
+  input.disabled = true;
+  try {
+    applyState(await api(`/api/sheets/${encodeURIComponent(slug)}`, { method: 'PUT', body: { showHidden: on } }));
+    toast(on ? 'Hidden tabs are now included in /all' : 'Hidden tabs are left out of /all');
+  } catch (err) {
+    toast(err.message);
+    input.checked = !on;
+  }
+  input.disabled = false;
+}
+
+function clearErrors(slug, btn) {
+  return busy(btn, 'Clearing…', async () => {
+    try {
+      const sheet = await api(`/api/sheets/${encodeURIComponent(slug)}/clear-errors`, { method: 'POST' });
+      applySheet(sheet);
+      toast(sheet.health.consecutiveFailures ? 'Error counter reset, trying Google again' : 'Errors cleared');
+    } catch (err) {
+      toast(err.message);
+    }
+  });
+}
+
 async function busy(btn, label, fn) {
   const old = btn.textContent;
   btn.disabled = true;
@@ -616,6 +664,7 @@ function openSheetDialog(sheet) {
     : 'A Google Cloud API key with the Google Sheets API enabled.';
   form.cacheSeconds.value = sheet ? sheet.cacheSeconds : 5;
   form.refresh.checked = sheet ? sheet.refresh : true;
+  form.showHidden.checked = sheet ? sheet.showHidden : false;
   syncRefreshLabel();
   if (sheet) {
     form.name.value = sheet.name;
@@ -627,8 +676,10 @@ function openSheetDialog(sheet) {
 
 function syncRefreshLabel() {
   $('#refresh-label').textContent = form.refresh.checked ? 'On' : 'Off (paused)';
+  $('#hidden-label').textContent = form.showHidden.checked ? 'On' : 'Off';
 }
 form.refresh.addEventListener('change', syncRefreshLabel);
+form.showHidden.addEventListener('change', syncRefreshLabel);
 
 $('#all-url').textContent = `${base}/all`;
 $('#all-open').href = `${base}/all`;
@@ -648,6 +699,7 @@ form.addEventListener('submit', async (e) => {
     apiKey: form.apiKey.value.trim() || undefined,
     cacheSeconds: form.cacheSeconds.value,
     refresh: form.refresh.checked,
+    showHidden: form.showHidden.checked,
   };
   try {
     const wasOpen = editing ? isOpen(editing) : true; // new sheets open so their tabs are visible
@@ -702,6 +754,7 @@ $('#preview-refresh').onclick = () => pvCurrent && showPreview(pvCurrent.slug, p
 // ---------- delegated events ----------
 $('#sheets').addEventListener('change', (e) => {
   if (e.target.dataset.toggle) setRefresh(e.target.dataset.toggle, e.target.checked, e.target);
+  if (e.target.dataset.showHidden) setShowHidden(e.target.dataset.showHidden, e.target.checked, e.target);
 });
 
 $('#sheets').addEventListener('click', async (e) => {
@@ -718,6 +771,7 @@ $('#sheets').addEventListener('click', async (e) => {
   if (d.preview) return showPreview(d.preview, d.tab);
   if (d.check) return checkSheet(d.check, b);
   if (d.fetch) return fetchOnce(d.fetch, b);
+  if (d.clear) return clearErrors(d.clear, b);
   if (d.applyCache) return applyCache(d.applyCache, Number(d.seconds), b);
   if (d.edit) return openSheetDialog(state.sheets.find((s) => s.slug === d.edit));
   if (d.delete) {
