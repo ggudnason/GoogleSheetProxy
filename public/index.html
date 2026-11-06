@@ -64,6 +64,19 @@
   dialog h3 { margin: 0; }
   dialog .buttons { display: flex; justify-content: end; gap: 8px; }
   #preview { width: min(1000px, calc(100vw - 32px)); }
+  #columns { width: min(820px, calc(100vw - 32px)); }
+  .cols { border-collapse: collapse; width: 100%; font-size: 14px; }
+  .cols th, .cols td { padding: 7px 8px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+  .cols th { position: sticky; top: 0; background: var(--code-bg); font-weight: 600; font-size: 13px; z-index: 1; }
+  .cols td.serve { width: 1%; }
+  .cols td.col { min-width: 120px; overflow-wrap: anywhere; }
+  .cols td.sample { color: var(--muted); max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cols .letter { display: inline-block; min-width: 20px; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  .cols .result { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; margin-top: 3px; }
+  .cols .result.warn { color: var(--warn); }
+  .cols tr.off td.col, .cols tr.off td.sample { opacity: .5; }
+  .cols tr.off input[type=text] { opacity: .5; }
+  @media (max-width: 640px) { .cols td.sample, .cols th.sample { display: none; } }
   #preview .wrap { padding: 0 20px 20px; }
   .table-scroll { overflow: auto; max-height: 60vh; border: 1px solid var(--line); border-radius: 8px; }
   .data { border-collapse: collapse; width: 100%; font-size: 13px; }
@@ -221,6 +234,22 @@
     <p class="small"><span class="url" id="preview-url"></span></p>
     <div id="preview-body"></div>
   </div>
+</dialog>
+
+<dialog id="columns">
+  <form method="dialog" id="columns-form">
+    <div>
+      <h3 id="columns-title">Columns</h3>
+      <p class="small muted" style="margin:4px 0 0">Choose which columns vMix gets and what they're called. Names are made vMix-safe automatically, so the name vMix gets is shown under each field. New columns added to the sheet later are served by default.</p>
+    </div>
+    <div id="columns-body"></div>
+    <div id="columns-error" class="error-box" hidden></div>
+    <div class="buttons">
+      <button type="button" class="link" id="columns-reset" style="margin-right:auto">Serve all, original names</button>
+      <button type="button" id="columns-cancel">Cancel</button>
+      <button class="primary" type="submit" id="columns-save">Save</button>
+    </div>
+  </form>
 </dialog>
 
 <div id="toast"></div>
@@ -428,13 +457,25 @@ function bodyHtml(s) {
     const u = tabUrl(s.slug, t.name);
     const hidden = t.hidden ? ' <span class="pill" title="Hidden in Google Sheets. Included because Show hidden sheets is on.">Hidden</span>' : '';
     return `<tr>
-      <td class="name">${esc(t.name)}${hidden}</td>
+      <td class="name">${esc(t.name)}${hidden}${columnsSummary(s, t)}</td>
       <td class="urlcell"><span class="url">${esc(u)}</span></td>
       <td class="actions">
         <button class="link" data-copy="${esc(u)}">Copy</button>
-        <button class="link" data-preview="${esc(s.slug)}" data-tab="${esc(t.name)}">Preview</button>
+        <button class="link" data-columns="${esc(s.slug)}" data-gid="${t.gid}" data-tab="${esc(t.name)}">Columns</button>
+        <button class="link" data-preview="${esc(s.slug)}" data-gid="${t.gid}" data-tab="${esc(t.name)}">Preview</button>
       </td></tr>`;
   }).join('')}</table>`;
+}
+
+/** "2 hidden · 1 renamed" under a sheet's name, when it has column settings. */
+function columnsSummary(s, t) {
+  const c = s.columns?.[t.gid];
+  if (!c) return '';
+  const parts = [];
+  if (c.hide?.length) parts.push(`${c.hide.length} column${c.hide.length === 1 ? '' : 's'} hidden`);
+  const r = Object.keys(c.rename || {}).length;
+  if (r) parts.push(`${r} renamed`);
+  return `<div class="small muted" style="font-weight:400">${parts.join(' · ')}</div>`;
 }
 
 /** Set innerHTML only if it changed (keeps focus, hover and clicks intact). */
@@ -717,25 +758,29 @@ form.addEventListener('submit', async (e) => {
 const pv = $('#preview');
 let pvCurrent = null;
 
-async function showPreview(slug, tab) {
-  pvCurrent = { slug, tab };
+async function showPreview(slug, tab, gid) {
+  pvCurrent = { slug, tab, gid };
   const u = tabUrl(slug, tab);
   $('#preview-title').textContent = tab;
   $('#preview-url').textContent = u;
   $('#preview-body').innerHTML = '<p class="muted">Loading…</p>';
   if (!pv.open) pv.showModal();
   try {
-    const [res, rawRes] = await Promise.all([fetch(u), fetch(u + '?raw')]);
+    const [res, info] = await Promise.all([
+      fetch(u),
+      api(`/api/sheets/${encodeURIComponent(slug)}/columns/${gid}`).catch(() => null),
+    ]);
     const rows = await res.json();
     if (!res.ok) throw new Error(rows.error || res.statusText);
-    const raw = rawRes.ok ? await rawRes.json() : [];
-    const originals = (raw[0] || []).map((h) => String(h ?? '').trim());
+    // served name -> the column's header in the sheet
+    const headerOf = new Map((info?.columns || []).filter((c) => c.name).map((c) => [c.name, c.header.trim()]));
+    const hiddenCount = (info?.columns || []).filter((c) => c.hidden).length;
     if (!rows.length) { $('#preview-body').innerHTML = '<p class="muted">No data rows.</p>'; return; }
     const cols = Object.keys(rows[0]);
-    $('#preview-body').innerHTML = `<p class="small muted">${rows.length} row${rows.length === 1 ? '' : 's'} · ${cols.length} column${cols.length === 1 ? '' : 's'} · add <code>/N</code> to the URL for a single row · column names are the ones vMix sees, with the sheet’s own name underneath when it differs</p>
+    $('#preview-body').innerHTML = `<p class="small muted">${rows.length} row${rows.length === 1 ? '' : 's'} · ${cols.length} column${cols.length === 1 ? '' : 's'}${hiddenCount ? ` (${hiddenCount} hidden in Columns)` : ''} · add <code>/N</code> to the URL for a single row · column names are the ones vMix sees, with the sheet’s own name underneath when it differs</p>
       <div class="table-scroll"><table class="data">
-        <thead><tr><th>#</th>${cols.map((c, i) => {
-          const orig = originals[i];
+        <thead><tr><th>#</th>${cols.map((c) => {
+          const orig = headerOf.get(c);
           const sub = orig && orig !== c ? `<div class="small muted" style="font-weight:400" title="Name in the sheet">${esc(orig.replace(/\n/g, ' '))}</div>` : '';
           return `<th>${esc(c)}${sub}</th>`;
         }).join('')}</tr></thead>
@@ -745,7 +790,130 @@ async function showPreview(slug, tab) {
     $('#preview-body').innerHTML = `<div class="error-box">${esc(e.message)}</div>`;
   }
 }
-$('#preview-refresh').onclick = () => pvCurrent && showPreview(pvCurrent.slug, pvCurrent.tab);
+$('#preview-refresh').onclick = () => pvCurrent && showPreview(pvCurrent.slug, pvCurrent.tab, pvCurrent.gid);
+
+// ---------- columns dialog ----------
+// Same conversion as the server's vmixName(), to show the name vMix will get while typing.
+const TRANSLIT = { þ: 'th', Þ: 'Th', ð: 'd', Ð: 'D', æ: 'ae', Æ: 'Ae', ø: 'o', Ø: 'O', ß: 'ss', œ: 'oe', Œ: 'Oe', ł: 'l', Ł: 'L' };
+function vmixName(name) {
+  let k = String(name)
+    .replace(/[þÞðÐæÆøØßœŒłŁ]/g, (c) => TRANSLIT[c])
+    .normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/#/g, ' Number ').replace(/&/g, ' and ').replace(/%/g, ' Percent ')
+    .replace(/[^A-Za-z0-9_]+/g, '_').replace(/_+/g, '_').replace(/^_+|_+$/g, '');
+  if (/^[0-9]/.test(k)) k = `_${k}`;
+  return k;
+}
+
+const colDlg = $('#columns');
+const colForm = $('#columns-form');
+let colCurrent = null; // { slug, gid, info }
+
+async function openColumns(slug, gid, tabName) {
+  colCurrent = { slug, gid, info: null };
+  $('#columns-title').textContent = `Columns · ${tabName}`;
+  $('#columns-error').hidden = true;
+  $('#columns-body').innerHTML = '<p class="muted">Loading columns…</p>';
+  $('#columns-save').disabled = true;
+  if (!colDlg.open) colDlg.showModal();
+  try {
+    colCurrent.info = await api(`/api/sheets/${encodeURIComponent(slug)}/columns/${gid}`);
+    renderColumns();
+  } catch (err) {
+    $('#columns-body').innerHTML = `<div class="error-box">${esc(err.message)}</div>`;
+  }
+}
+
+function renderColumns() {
+  const { info } = colCurrent;
+  if (!info.columns.length) {
+    $('#columns-body').innerHTML = '<p class="muted">This sheet has no columns yet.</p>';
+    return;
+  }
+  const missing = info.missing.length
+    ? `<p class="small muted">Saved settings are kept for ${info.missing.length} column${info.missing.length === 1 ? '' : 's'} no longer in the sheet (${info.missing.map(esc).join(', ')}), in case ${info.missing.length === 1 ? 'it comes' : 'they come'} back.</p>` : '';
+  $('#columns-body').innerHTML = `${missing}<div class="table-scroll"><table class="cols">
+    <thead><tr><th>Serve</th><th>Column in the sheet</th><th>Name for vMix</th><th class="sample">Example</th></tr></thead>
+    <tbody>${info.columns.map((c, i) => `<tr data-i="${i}" class="${c.hidden ? 'off' : ''}">
+      <td class="serve"><input type="checkbox" class="switch" data-serve ${c.hidden ? '' : 'checked'} aria-label="Serve ${esc(c.id)}"></td>
+      <td class="col"><span class="letter">${c.letter}</span> ${c.header.trim() ? esc(c.header.replace(/\n/g, ' ')) : '<span class="muted">(no header)</span>'}</td>
+      <td><input type="text" data-rename value="${esc(c.rename)}" placeholder="${esc(c.defaultName)}" maxlength="100" aria-label="Name for ${esc(c.id)}">
+        <div class="result" data-result></div></td>
+      <td class="sample" title="${esc(c.sample)}">${esc(c.sample)}</td>
+    </tr>`).join('')}</tbody></table></div>`;
+  $('#columns-save').disabled = false;
+  updateColumnResults();
+}
+
+/** Show the name vMix gets for each served column, and flag clashes. */
+function updateColumnResults() {
+  const rows = [...$('#columns-body').querySelectorAll('tr[data-i]')];
+  const seen = new Map();
+  for (const tr of rows) {
+    const c = colCurrent.info.columns[tr.dataset.i];
+    const on = tr.querySelector('[data-serve]').checked;
+    const typed = tr.querySelector('[data-rename]').value.trim();
+    tr.classList.toggle('off', !on);
+    const out = tr.querySelector('[data-result]');
+    if (!on) { out.textContent = 'Not served'; out.className = 'result muted'; continue; }
+    let name = vmixName(typed || c.header.trim()) || c.letter;
+    const key = name.toLowerCase();
+    const n = (seen.get(key) || 0) + 1;
+    seen.set(key, n);
+    if (n > 1) name = `${name}_${n}`;
+    if (typed && !vmixName(typed)) {
+      out.textContent = 'Needs at least one letter or digit';
+      out.className = 'result warn';
+    } else if (n > 1) {
+      out.textContent = `→ ${name} (another column already uses this name)`;
+      out.className = 'result warn';
+    } else {
+      out.textContent = typed || name !== c.header.trim() ? `→ ${name}` : '';
+      out.className = 'result muted';
+    }
+  }
+}
+$('#columns-body').addEventListener('input', updateColumnResults);
+$('#columns-body').addEventListener('change', updateColumnResults);
+$('#columns-cancel').onclick = () => colDlg.close();
+$('#columns-reset').onclick = () => {
+  for (const tr of $('#columns-body').querySelectorAll('tr[data-i]')) {
+    tr.querySelector('[data-serve]').checked = true;
+    tr.querySelector('[data-rename]').value = '';
+  }
+  updateColumnResults();
+};
+
+colForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  if (!colCurrent?.info) return;
+  const hide = [];
+  const rename = {};
+  // Keep settings for columns that are missing from the sheet right now.
+  const old = colCurrent.info.settings;
+  for (const id of colCurrent.info.missing) {
+    if (old.hide?.includes(id)) hide.push(id);
+    if (old.rename?.[id]) rename[id] = old.rename[id];
+  }
+  for (const tr of $('#columns-body').querySelectorAll('tr[data-i]')) {
+    const c = colCurrent.info.columns[tr.dataset.i];
+    if (!tr.querySelector('[data-serve]').checked) hide.push(c.id);
+    const typed = tr.querySelector('[data-rename]').value.trim();
+    if (typed) rename[c.id] = typed;
+  }
+  const btn = $('#columns-save');
+  btn.disabled = true;
+  try {
+    await api(`/api/sheets/${encodeURIComponent(colCurrent.slug)}/columns/${colCurrent.gid}`, { method: 'PUT', body: { hide, rename } });
+    applyState(await api('/api/state'));
+    colDlg.close();
+    toast('Columns saved. vMix gets the new columns on its next refresh.');
+  } catch (err) {
+    $('#columns-error').textContent = err.message;
+    $('#columns-error').hidden = false;
+  }
+  btn.disabled = false;
+});
 
 // ---------- delegated events ----------
 $('#sheets').addEventListener('change', (e) => {
@@ -764,7 +932,8 @@ $('#sheets').addEventListener('click', async (e) => {
   if (!b) return;
   const d = b.dataset;
   if (d.copy) return copy(d.copy);
-  if (d.preview) return showPreview(d.preview, d.tab);
+  if (d.preview) return showPreview(d.preview, d.tab, d.gid);
+  if (d.columns) return openColumns(d.columns, d.gid, d.tab);
   if (d.check) return checkSheet(d.check, b);
   if (d.fetch) return fetchOnce(d.fetch, b);
   if (d.clear) return clearErrors(d.clear, b);

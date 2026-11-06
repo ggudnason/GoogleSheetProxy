@@ -554,9 +554,11 @@ async function allTabsData(sheet, q) {
   const render = renderOption(q);
   const values = await getAllValues(sheet, render);
   if (q.has('raw')) return values;
+  const { tabs } = await getTabs(sheet);
   const out = {};
   for (const [name, v] of Object.entries(values)) {
-    let rows = rowsToObjects(v, { skipEmpty: q.get('empty') !== '1', vmixKeys: q.get('keys') !== 'original' });
+    const columns = columnSettings(sheet, tabs.find((t) => t.name === name), q);
+    let rows = rowsToObjects(v, { skipEmpty: q.get('empty') !== '1', vmixKeys: q.get('keys') !== 'original', columns });
     if (q.has('limit')) rows = rows.slice(0, Math.max(0, Number(q.get('limit')) || 0));
     out[name] = rows;
   }
@@ -651,34 +653,75 @@ function vmixName(name) {
 }
 
 /**
- * Turn a 2D array into [{Header: value, ...}, ...] with consistent keys.
- * vmixKeys (default): make the names vMix-safe and unique ignoring case, because
- * vMix treats "Name" and "NAME" as the same column.
+ * A stable id for each column, used to store column settings: the header text
+ * as written in the sheet (trimmed), or the column letter when the header is
+ * blank. Repeated headers get a suffix: "Name", "Name_2".
  */
-function rowsToObjects(values, { skipEmpty = true, vmixKeys = true } = {}) {
-  if (values.length === 0) return [];
+function columnIds(values) {
+  if (!values.length) return [];
   const [headerRow, ...rows] = values;
   const width = Math.max(headerRow.length, ...rows.map((r) => r.length));
-
   const seen = new Map();
-  const headers = [];
+  const ids = [];
   for (let i = 0; i < width; i++) {
-    const raw = String(headerRow[i] ?? '').trim();
-    let h = (vmixKeys ? vmixName(raw) : raw) || columnLetter(i);
-    const id = vmixKeys ? h.toLowerCase() : h;
+    let id = String(headerRow[i] ?? '').trim() || columnLetter(i);
     const count = seen.get(id) || 0;
     seen.set(id, count + 1);
-    if (count > 0) h = `${h}_${count + 1}`;
-    headers.push(h);
+    if (count > 0) id = `${id}_${count + 1}`;
+    ids.push(id);
   }
+  return ids;
+}
 
-  return rows
-    .filter((r) => !skipEmpty || r.some((c) => String(c ?? '').trim() !== ''))
+/**
+ * The columns a sheet serves, in order: [{ index, id, header, name }].
+ * columns = the sheet's saved settings { hide: [id], rename: { id: name } }.
+ * vmixKeys (default): make the names vMix-safe and unique ignoring case, because
+ * vMix treats "Name" and "NAME" as the same column. A custom name goes through
+ * the same conversion, so it is always safe for vMix.
+ */
+function servedColumns(values, { vmixKeys = true, columns } = {}) {
+  if (!values.length) return [];
+  const hide = new Set(columns?.hide || []);
+  const rename = columns?.rename || {};
+  const headerRow = values[0];
+  const seen = new Map();
+  const out = [];
+  columnIds(values).forEach((id, i) => {
+    if (hide.has(id)) return;
+    const header = String(headerRow[i] ?? '').trim();
+    const wanted = rename[id] ?? header;
+    let name = (vmixKeys ? vmixName(wanted) : wanted) || columnLetter(i);
+    const key = vmixKeys ? name.toLowerCase() : name;
+    const count = seen.get(key) || 0;
+    seen.set(key, count + 1);
+    if (count > 0) name = `${name}_${count + 1}`;
+    out.push({ index: i, id, header, name });
+  });
+  return out;
+}
+
+/** Turn a 2D array into [{Header: value, ...}, ...] with consistent keys. */
+function rowsToObjects(values, { skipEmpty = true, vmixKeys = true, columns } = {}) {
+  if (values.length === 0) return [];
+  const cols = servedColumns(values, { vmixKeys, columns });
+  return values.slice(1)
+    // A row counts as empty when every column it serves is empty.
+    .filter((r) => !skipEmpty || cols.some((c) => String(r[c.index] ?? '').trim() !== ''))
     .map((r) => {
       const obj = {};
-      headers.forEach((h, i) => (obj[h] = r[i] === undefined || r[i] === null ? '' : String(r[i])));
+      for (const c of cols) obj[c.name] = r[c.index] === undefined || r[c.index] === null ? '' : String(r[c.index]);
       return obj;
     });
+}
+
+/**
+ * Saved column settings for one sheet (tab) of a spreadsheet, keyed by the
+ * sheet's gid so they survive renaming the sheet. ?columns=all ignores them.
+ */
+function columnSettings(sheet, tab, q) {
+  if (!tab || q?.get('columns') === 'all') return undefined;
+  return sheet.columns?.[tab.gid];
 }
 
 function columnLetter(i) {
@@ -692,7 +735,9 @@ async function tabData(sheet, tabName, rowParam, q) {
   const values = await getValues(sheet, tab.name, q.get('range') || '', renderOption(q));
   if (q.has('raw')) return values;
 
-  let rows = rowsToObjects(values, { skipEmpty: q.get('empty') !== '1', vmixKeys: q.get('keys') !== 'original' });
+  let rows = rowsToObjects(values, {
+    skipEmpty: q.get('empty') !== '1', vmixKeys: q.get('keys') !== 'original', columns: columnSettings(sheet, tab, q),
+  });
   rowParam = rowParam ?? q.get('row');
   if (rowParam !== undefined && rowParam !== null) {
     const n = Number(rowParam);
@@ -716,6 +761,7 @@ function publicSheet(s) {
     cacheSeconds: s.cacheSeconds,
     refresh: s.refresh !== false,
     showHidden: s.showHidden === true,
+    columns: s.columns || {}, // { gid: { hide: [id], rename: { id: name } } }
   };
 }
 
@@ -757,6 +803,47 @@ function validateSheetInput(body, existing) {
   return { name, spreadsheetId, cacheSeconds, refresh, showHidden };
 }
 
+/** Check { hide, rename } from the Columns dialog. Returns null for "no settings". */
+function validateColumnSettings(body) {
+  const hide = [...new Set((Array.isArray(body.hide) ? body.hide : []).map(String))];
+  const rename = {};
+  for (const [id, name] of Object.entries(body.rename && typeof body.rename === 'object' ? body.rename : {})) {
+    const n = String(name ?? '').trim();
+    if (!n) continue;
+    if (n.length > 100) throw httpError(400, `The name for "${id}" is too long (100 characters at most).`);
+    if (!vmixName(n)) throw httpError(400, `"${n}" has no letters or digits, so vMix can't use it as a column name.`);
+    rename[id] = n;
+  }
+  if (!hide.length && !Object.keys(rename).length) return null;
+  return { ...(hide.length && { hide }), ...(Object.keys(rename).length && { rename }) };
+}
+
+/** Every column of one sheet as the Columns dialog shows it. */
+async function columnsInfo(sheet, tab) {
+  const values = await getValues(sheet, tab.name, '', 'FORMATTED_VALUE');
+  const settings = sheet.columns?.[tab.gid] || {};
+  const served = new Map(servedColumns(values, { columns: settings }).map((c) => [c.id, c.name]));
+  const defaults = servedColumns(values);
+  const sampleRow = values.slice(1).find((r) => r.some((c) => String(c ?? '').trim() !== '')) || [];
+  const ids = columnIds(values);
+  return {
+    sheet: { name: tab.name, gid: tab.gid },
+    settings,
+    // Saved settings for columns that are no longer in the sheet (kept in case they come back).
+    missing: [...new Set([...(settings.hide || []), ...Object.keys(settings.rename || {})])].filter((id) => !ids.includes(id)),
+    columns: ids.map((id, i) => ({
+      id,
+      letter: columnLetter(i),
+      header: String(values[0][i] ?? ''),
+      defaultName: defaults[i].name,
+      rename: settings.rename?.[id] || '',
+      hidden: (settings.hide || []).includes(id),
+      name: served.get(id) || null, // the name vMix gets, or null when hidden
+      sample: String(sampleRow[i] ?? ''),
+    })),
+  };
+}
+
 async function handleAdmin(req, res, parts) {
   const method = req.method;
   const body = ['POST', 'PUT'].includes(method) ? await readJson(req) : {};
@@ -795,6 +882,24 @@ async function handleAdmin(req, res, parts) {
       }
       if (sheet.refresh) startPoller(sheet, healthOf(sheet).consecutiveFailures ? retryDelayMs(healthOf(sheet).consecutiveFailures) : ttlMs(sheet));
       return sendJson(res, 200, { ...publicSheet(sheet), health: sheetHealth(sheet) });
+    }
+
+    // GET /api/sheets/:slug/columns/:gid — every column of one sheet, with its
+    // saved setting and a sample value (the Columns dialog and the Preview).
+    // PUT /api/sheets/:slug/columns/:gid  { hide: [id], rename: { id: name } }
+    if (parts[3] === 'columns' && parts.length === 5 && ['GET', 'PUT'].includes(method)) {
+      const { tabs } = await getTabs(sheet);
+      const tab = tabs.find((t) => String(t.gid) === parts[4]);
+      if (!tab) throw httpError(404, 'That sheet no longer exists in the spreadsheet. Check the spreadsheet and try again.');
+      if (method === 'PUT') {
+        const settings = validateColumnSettings(body);
+        sheet.columns = { ...sheet.columns };
+        if (settings) sheet.columns[tab.gid] = settings;
+        else delete sheet.columns[tab.gid];
+        if (!Object.keys(sheet.columns).length) delete sheet.columns;
+        saveConfig();
+      }
+      return sendJson(res, 200, await columnsInfo(sheet, tab));
     }
 
     // POST /api/sheets/:slug/clear-errors — forget the error history (the Clear button).
@@ -840,6 +945,8 @@ async function handleAdmin(req, res, parts) {
       if (sourceChanged) {
         clearCache(sheet);
         health.delete(sheet.id);
+        // Column settings belong to the old spreadsheet's sheets.
+        if (fields.spreadsheetId !== sheet.spreadsheetId) delete sheet.columns;
       }
       Object.assign(sheet, fields);
       if (body.slug && slugify(body.slug) !== sheet.slug) sheet.slug = uniqueSlug(body.slug, sheet.slug);

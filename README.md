@@ -40,7 +40,13 @@ Spreadsheets and their settings, including API keys, are saved in `config.json`.
   - **Live:** the proxy re-reads the spreadsheet from Google every cache period in the background, whether or not vMix is asking.
   - **Paused:** vMix keeps receiving the last fetched data, and Google is not called. Use this to lock graphics while someone edits the spreadsheet. **Fetch latest once** updates the held data a single time without turning live refresh back on.
   - If the proxy restarts while a spreadsheet is paused, it fetches once on the first request and then holds that data.
-- For each spreadsheet, every sheet is listed with its JSON URL, a **Copy** button and a **Preview** that shows exactly what vMix will see.
+- For each spreadsheet, every sheet is listed with its JSON URL, a **Copy** button, **Columns** (see below) and a **Preview** that shows exactly what vMix will see.
+- **Columns** lets you choose which of a sheet's columns vMix gets, and give any column your own name:
+  - Turn **Serve** off for a column to leave it out of that sheet's URL and of `/all`.
+  - Type a name under **Name for vMix** to rename a column. Custom names are made vMix-safe the same way as headers (see [Column names](#column-names)), and the dialog shows the name vMix will get. Leave the field blank to keep the sheet's own header.
+  - Columns you add to the sheet later are served by default.
+  - The sheet's row in the interface shows how many columns are hidden or renamed. **Serve all, original names** undoes everything for that sheet.
+  - Settings are saved per sheet and follow it if the sheet is renamed in Google Sheets. Columns are matched by their header text, so renaming a header in the sheet resets that column to served, with its new name. Settings for a column that disappears are kept in case it comes back.
 - With more than one spreadsheet, the cards start collapsed to one line each, showing the spreadsheet's name, status and Live/Paused. Every card header also shows a status dot and how long ago the data vMix gets was last updated, counting up every second:
   - The dot is green when polling is working, amber when Google is failing and vMix gets the last good data, red when there's no data at all, and dimmed when the spreadsheet is paused. It pulses each time new data arrives from Google.
   - While Google is failing, the header also shows when the next retry is. The age turns amber when updates have stopped coming through for more than a few poll periods.
@@ -133,9 +139,12 @@ The Preview shows the names vMix sees, with the sheet's own name underneath when
 | `?raw` | Return the raw 2D array of cells, with no header mapping |
 | `?render=unformatted` | Return raw numbers instead of the sheet's display formatting. `formula` returns the formulas. |
 | `?empty=1` | Keep blank rows. By default they are skipped. |
-| `?keys=original` | Use the sheet's column names exactly as written, instead of vMix-safe names |
+| `?keys=original` | Use the sheet's column names exactly as written, instead of vMix-safe names. Custom names from **Columns** are used as typed. |
+| `?columns=all` | Ignore the **Columns** settings: serve every column with its original name |
 
-`/all` and `/all/<spreadsheet>` accept `limit` (applied to each sheet), `render`, `empty`, `keys` and `format=object`. `raw` implies `format=object`.
+`/all` and `/all/<spreadsheet>` accept `limit` (applied to each sheet), `render`, `empty`, `keys`, `columns=all` and `format=object`. `raw` implies `format=object`.
+
+`?raw` returns the cells exactly as they are in the sheet, so **Columns** settings don't apply to it. A row counts as blank, and is skipped, when every column that is served is empty.
 
 ## Notes
 
