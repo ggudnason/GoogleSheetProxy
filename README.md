@@ -43,7 +43,7 @@ Spreadsheets and their settings, including API keys, are saved in `config.json`.
 - For each spreadsheet, every sheet is listed with its JSON URL, a **Copy** button, **Columns** (see below) and a **Preview** that shows exactly what vMix will see.
 - **Columns** lets you choose which of a sheet's columns vMix gets, and give any column your own name:
   - Turn **Serve** off for a column to leave it out of that sheet's URL and of `/all`.
-  - Type a name under **Name for vMix** to rename a column. Custom names are made vMix-safe the same way as headers (see [Column names](#column-names)), and the dialog shows the name vMix will get. Leave the field blank to keep the sheet's own header.
+  - Each field under **Name for vMix** starts with the name vMix gets now. Change only the columns you want to rename and leave the rest as they are. Custom names are made vMix-safe the same way as headers (see [Column names](#column-names)), and the dialog shows the name vMix will get. Clear a field to go back to the generated name.
   - Columns you add to the sheet later are served by default.
   - The sheet's row in the interface shows how many columns are hidden or renamed. **Serve all, original names** undoes everything for that sheet.
   - Settings are saved per sheet and follow it if the sheet is renamed in Google Sheets. Columns are matched by their header text, so renaming a header in the sheet resets that column to served, with its new name. Settings for a column that disappears are kept in case it comes back.

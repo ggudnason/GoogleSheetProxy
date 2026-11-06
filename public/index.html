@@ -240,7 +240,7 @@
   <form method="dialog" id="columns-form">
     <div>
       <h3 id="columns-title">Columns</h3>
-      <p class="small muted" style="margin:4px 0 0">Choose which columns vMix gets and what they're called. Names are made vMix-safe automatically, so the name vMix gets is shown under each field. New columns added to the sheet later are served by default.</p>
+      <p class="small muted" style="margin:4px 0 0">Choose which columns vMix gets and what they're called. Each field starts with the name vMix gets now. Change only the ones you want; names are made vMix-safe automatically. New columns added to the sheet later are served by default.</p>
     </div>
     <div id="columns-body"></div>
     <div id="columns-error" class="error-box" hidden></div>
@@ -837,7 +837,7 @@ function renderColumns() {
     <tbody>${info.columns.map((c, i) => `<tr data-i="${i}" class="${c.hidden ? 'off' : ''}">
       <td class="serve"><input type="checkbox" class="switch" data-serve ${c.hidden ? '' : 'checked'} aria-label="Serve ${esc(c.id)}"></td>
       <td class="col"><span class="letter">${c.letter}</span> ${c.header.trim() ? esc(c.header.replace(/\n/g, ' ')) : '<span class="muted">(no header)</span>'}</td>
-      <td><input type="text" data-rename value="${esc(c.rename)}" placeholder="${esc(c.defaultName)}" maxlength="100" aria-label="Name for ${esc(c.id)}">
+      <td><input type="text" data-rename value="${esc(c.rename || c.defaultName)}" placeholder="${esc(c.defaultName)}" maxlength="100" aria-label="Name for ${esc(c.id)}">
         <div class="result" data-result></div></td>
       <td class="sample" title="${esc(c.sample)}">${esc(c.sample)}</td>
     </tr>`).join('')}</tbody></table></div>`;
@@ -852,7 +852,8 @@ function updateColumnResults() {
   for (const tr of rows) {
     const c = colCurrent.info.columns[tr.dataset.i];
     const on = tr.querySelector('[data-serve]').checked;
-    const typed = tr.querySelector('[data-rename]').value.trim();
+    const value = tr.querySelector('[data-rename]').value.trim();
+    const typed = value && value !== c.defaultName ? value : ''; // only a changed name counts as a rename
     tr.classList.toggle('off', !on);
     const out = tr.querySelector('[data-result]');
     if (!on) { out.textContent = 'Not served'; out.className = 'result muted'; continue; }
@@ -868,7 +869,7 @@ function updateColumnResults() {
       out.textContent = `→ ${name} (another column already uses this name)`;
       out.className = 'result warn';
     } else {
-      out.textContent = typed || name !== c.header.trim() ? `→ ${name}` : '';
+      out.textContent = typed ? (name !== typed ? `→ ${name}` : 'Renamed') : (value ? '' : `Uses ${name}`);
       out.className = 'result muted';
     }
   }
@@ -879,7 +880,7 @@ $('#columns-cancel').onclick = () => colDlg.close();
 $('#columns-reset').onclick = () => {
   for (const tr of $('#columns-body').querySelectorAll('tr[data-i]')) {
     tr.querySelector('[data-serve]').checked = true;
-    tr.querySelector('[data-rename]').value = '';
+    tr.querySelector('[data-rename]').value = colCurrent.info.columns[tr.dataset.i].defaultName;
   }
   updateColumnResults();
 };
@@ -899,7 +900,7 @@ colForm.addEventListener('submit', async (e) => {
     const c = colCurrent.info.columns[tr.dataset.i];
     if (!tr.querySelector('[data-serve]').checked) hide.push(c.id);
     const typed = tr.querySelector('[data-rename]').value.trim();
-    if (typed) rename[c.id] = typed;
+    if (typed && typed !== c.defaultName) rename[c.id] = typed;
   }
   const btn = $('#columns-save');
   btn.disabled = true;
