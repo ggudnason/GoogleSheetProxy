@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Sheet Proxy</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64' width='64' height='64' role='img' aria-label='Google Sheet Proxy'%3E%3Crect width='64' height='64' rx='14' fill='%230f172a'/%3E%3Cg fill='none' stroke='%2338bdf8' stroke-width='3.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M18 14c-5 0-6 2-6 6v6c0 3-2 6-5 6 3 0 5 3 5 6v6c0 4 1 6 6 6'/%3E%3Cpath d='M46 14c5 0 6 2 6 6v6c0 3 2 6 5 6-3 0-5 3-5 6v6c0 4-1 6-6 6'/%3E%3C/g%3E%3Cg fill='%23e2e8f0'%3E%3Crect x='21' y='20' width='22' height='6' rx='2'/%3E%3Cg fill-opacity='0.75'%3E%3Crect x='21' y='29' width='8' height='6' rx='2'/%3E%3Crect x='31' y='29' width='12' height='6' rx='2'/%3E%3Crect x='21' y='38' width='8' height='6' rx='2'/%3E%3Crect x='31' y='38' width='12' height='6' rx='2'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E">
 <style>
   :root {
     --bg: #f5f6f8; --card: #fff; --text: #1b1d21; --muted: #6b7280; --line: #e3e6eb;
@@ -21,7 +22,8 @@
   body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
   header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
     max-width: 1000px; margin: 0 auto; padding: 28px 16px 8px; }
-  header h1 { margin: 0; font-size: 20px; }
+  header h1 { margin: 0; font-size: 20px; display: flex; align-items: center; gap: 10px; }
+  header h1 .logo { width: 28px; height: 28px; flex: none; }
   header p { margin: 2px 0 0; color: var(--muted); }
   main { max-width: 1000px; margin: 0 auto; padding: 8px 16px 60px; display: grid; gap: 16px; }
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow); }
@@ -155,7 +157,7 @@
 <body>
 <header>
   <div>
-    <h1>Google Sheet Proxy</h1>
+    <h1><img class="logo" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64' width='64' height='64' role='img' aria-label='Google Sheet Proxy'%3E%3Crect width='64' height='64' rx='14' fill='%230f172a'/%3E%3Cg fill='none' stroke='%2338bdf8' stroke-width='3.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M18 14c-5 0-6 2-6 6v6c0 3-2 6-5 6 3 0 5 3 5 6v6c0 4 1 6 6 6'/%3E%3Cpath d='M46 14c5 0 6 2 6 6v6c0 3 2 6 5 6-3 0-5 3-5 6v6c0 4-1 6-6 6'/%3E%3C/g%3E%3Cg fill='%23e2e8f0'%3E%3Crect x='21' y='20' width='22' height='6' rx='2'/%3E%3Cg fill-opacity='0.75'%3E%3Crect x='21' y='29' width='8' height='6' rx='2'/%3E%3Crect x='31' y='29' width='12' height='6' rx='2'/%3E%3Crect x='21' y='38' width='8' height='6' rx='2'/%3E%3Crect x='31' y='38' width='12' height='6' rx='2'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E" alt="">Google Sheet Proxy</h1>
     <p>Each sheet of each spreadsheet is a JSON data source for vMix.</p>
     <p class="small" id="usage"></p>
   </div>

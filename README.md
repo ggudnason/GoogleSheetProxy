@@ -1,3 +1,5 @@
+<img src="docs/logo.svg" alt="" width="72">
+
 # Google Sheet Proxy for vMix
 
 Connect one or more Google spreadsheets and serve every sheet in them as its own JSON endpoint, in the shape vMix Data Sources expects: an array of row objects, with the sheet's first row used as column names. You add and manage spreadsheets in a web interface.
