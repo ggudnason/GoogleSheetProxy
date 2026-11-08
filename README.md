@@ -135,6 +135,9 @@ The Preview shows the names vMix sees, with the sheet's own name underneath when
 |---|---|
 | `?range=A1:D20` | Read only this range. The first row of the range is used as the header. |
 | `?row=3` | Same as `/sheet/<spreadsheet>/<sheet>/3` |
+| `?field=Name&value=John` | Return the first row where the column `Name` is `John` (see [Finding a row](#finding-a-row)) |
+| `?before=2` | With `row` or `field`/`value`: also return up to 2 rows before that row |
+| `?after=2`, `?after=all` | With `row` or `field`/`value`: also return up to 2 rows after it, or every row after it |
 | `?limit=10` | Return only the first N rows |
 | `?raw` | Return the raw 2D array of cells, with no header mapping |
 | `?render=unformatted` | Return raw numbers instead of the sheet's display formatting. `formula` returns the formulas. |
@@ -145,6 +148,23 @@ The Preview shows the names vMix sees, with the sheet's own name underneath when
 `/all` and `/all/<spreadsheet>` accept `limit` (applied to each sheet), `render`, `empty`, `keys`, `columns=all` and `format=object`. `raw` implies `format=object`.
 
 `?raw` returns the cells exactly as they are in the sheet, so **Columns** settings don't apply to it. A row counts as blank, and is skipped, when every column that is served is empty.
+
+### Finding a row
+
+Look up a row by the value in one of its columns, for example the current item in a rundown:
+
+```
+/sheet/<spreadsheet>/<sheet>?field=Item&value=12
+/sheet/<spreadsheet>/<sheet>?field=Item&value=12&before=1&after=2
+/sheet/<spreadsheet>/<sheet>?field=Item&value=12&after=all
+```
+
+- The first row whose cell matches is returned, still wrapped in an array like every other sheet URL. Matching ignores case and spaces at the start and end.
+- `field` can be the name vMix gets, the sheet's own header, or a custom name from **Columns**, ignoring case. Columns hidden in **Columns** can be searched too, so you can look a row up by an ID that vMix doesn't get.
+- `before` and `after` add the rows around the match, in sheet order. `after=all` returns every row after it. Near the top or bottom of the sheet you get fewer rows.
+- With no match the result is an empty array `[]`. An unknown column gives an error that lists the column names.
+- `before` and `after` also work with a row number: `/sheet/<spreadsheet>/<sheet>/5?before=1&after=1`.
+- `limit` is applied last, to the rows that are returned.
 
 ## Notes
 

@@ -701,18 +701,50 @@ function servedColumns(values, { vmixKeys = true, columns } = {}) {
   return out;
 }
 
+/** The data rows (below the header) that are served: blank rows are left out unless skipEmpty is false. */
+function dataRows(values, cols, skipEmpty = true) {
+  // A row counts as empty when every column it serves is empty.
+  return values.slice(1).filter((r) => !skipEmpty || cols.some((c) => String(r[c.index] ?? '').trim() !== ''));
+}
+
+function rowObject(r, cols) {
+  const obj = {};
+  for (const c of cols) obj[c.name] = r[c.index] === undefined || r[c.index] === null ? '' : String(r[c.index]);
+  return obj;
+}
+
 /** Turn a 2D array into [{Header: value, ...}, ...] with consistent keys. */
 function rowsToObjects(values, { skipEmpty = true, vmixKeys = true, columns } = {}) {
   if (values.length === 0) return [];
   const cols = servedColumns(values, { vmixKeys, columns });
-  return values.slice(1)
-    // A row counts as empty when every column it serves is empty.
-    .filter((r) => !skipEmpty || cols.some((c) => String(r[c.index] ?? '').trim() !== ''))
-    .map((r) => {
-      const obj = {};
-      for (const c of cols) obj[c.name] = r[c.index] === undefined || r[c.index] === null ? '' : String(r[c.index]);
-      return obj;
-    });
+  return dataRows(values, cols, skipEmpty).map((r) => rowObject(r, cols));
+}
+
+/**
+ * Find the column ?field= names. It can be the name vMix gets, the generated
+ * vMix name, the sheet's own header or a custom name, ignoring case. Hidden
+ * columns can be searched too, so a row can be found by an ID vMix never sees.
+ */
+function findColumn(values, field, served) {
+  const want = field.trim().toLowerCase();
+  const servedName = new Map(served.map((c) => [c.index, c.name]));
+  const all = servedColumns(values);
+  const hit = all.find((c) => [servedName.get(c.index), c.name, c.header, c.id]
+    .some((n) => n && String(n).trim().toLowerCase() === want));
+  if (!hit) {
+    throw httpError(400, `Column "${field}" not found. Columns: ${served.map((c) => c.name).join(', ') || '(none)'}`);
+  }
+  return hit.index;
+}
+
+/** ?before=N / ?after=N|all: how many rows to add around the matched row. */
+function contextCount(q, name) {
+  if (!q.has(name)) return 0;
+  const v = q.get(name).trim().toLowerCase();
+  if (v === 'all') return Infinity;
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < 0) throw httpError(400, `${name} must be a whole number of rows, or "all"`);
+  return n;
 }
 
 /**
@@ -734,18 +766,36 @@ async function tabData(sheet, tabName, rowParam, q) {
   const tab = await resolveTab(sheet, tabName);
   const values = await getValues(sheet, tab.name, q.get('range') || '', renderOption(q));
   if (q.has('raw')) return values;
+  if (!values.length) return [];
 
-  let rows = rowsToObjects(values, {
-    skipEmpty: q.get('empty') !== '1', vmixKeys: q.get('keys') !== 'original', columns: columnSettings(sheet, tab, q),
-  });
+  const cols = servedColumns(values, { vmixKeys: q.get('keys') !== 'original', columns: columnSettings(sheet, tab, q) });
+  let rows = dataRows(values, cols, q.get('empty') !== '1');
+
+  // Pick one row, by position (?row= or /<n>) or by value (?field=&value=),
+  // optionally with ?before=N and ?after=N|all rows around it.
   rowParam = rowParam ?? q.get('row');
-  if (rowParam !== undefined && rowParam !== null) {
-    const n = Number(rowParam);
-    if (!Number.isInteger(n) || n < 1) throw httpError(400, 'Row must be a positive integer (1 = first data row)');
-    rows = rows[n - 1] ? [rows[n - 1]] : [];
+  const byRow = rowParam !== undefined && rowParam !== null;
+  const byField = q.has('field') || q.has('value');
+  if (byRow && byField) throw httpError(400, 'Use either row or field/value, not both');
+  if (byRow || byField) {
+    let at;
+    if (byRow) {
+      const n = Number(rowParam);
+      if (!Number.isInteger(n) || n < 1) throw httpError(400, 'Row must be a positive integer (1 = first data row)');
+      at = n - 1;
+    } else {
+      if (!q.get('field')?.trim()) throw httpError(400, 'field is required with value, e.g. ?field=Name&value=John');
+      if (!q.has('value')) throw httpError(400, 'value is required with field, e.g. ?field=Name&value=John');
+      const col = findColumn(values, q.get('field'), cols);
+      const want = q.get('value').trim().toLowerCase();
+      at = rows.findIndex((r) => String(r[col] ?? '').trim().toLowerCase() === want);
+    }
+    const before = contextCount(q, 'before');
+    const after = contextCount(q, 'after');
+    rows = at >= 0 && at < rows.length ? rows.slice(Math.max(0, at - before), at + 1 + Math.min(after, rows.length)) : [];
   }
   if (q.has('limit')) rows = rows.slice(0, Math.max(0, Number(q.get('limit')) || 0));
-  return rows;
+  return rows.map((r) => rowObject(r, cols));
 }
 
 // ---------------------------------------------------------------------------
