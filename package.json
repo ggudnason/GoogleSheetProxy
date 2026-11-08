@@ -2,6 +2,14 @@
   "name": "google-sheet-proxy",
   "version": "1.0.0",
   "description": "Proxy each tab of a Google Sheet as a JSON API for vMix Data Sources",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ggudnason/GoogleSheetProxy.git"
+  },
+  "homepage": "https://github.com/ggudnason/GoogleSheetProxy#readme",
+  "bugs": {
+    "url": "https://github.com/ggudnason/GoogleSheetProxy/issues"
+  },
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
