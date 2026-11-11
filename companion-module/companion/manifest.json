@@ -1,0 +1,34 @@
+{
+  "$schema": "../node_modules/@companion-module/base/assets/manifest.schema.json",
+  "type": "connection",
+  "id": "googlesheetproxy",
+  "name": "Google Sheet Proxy",
+  "shortname": "sheetproxy",
+  "description": "Control Google Sheet Proxy: turn auto refresh on and off, change the refresh interval, fetch now, and show live status and errors.",
+  "version": "0.0.0",
+  "license": "MIT",
+  "repository": "git+https://github.com/ggudnason/GoogleSheetProxy.git",
+  "bugs": "https://github.com/ggudnason/GoogleSheetProxy/issues",
+  "maintainers": [
+    {
+      "name": "ggudnason"
+    }
+  ],
+  "legacyIds": [],
+  "runtime": {
+    "type": "node22",
+    "api": "nodejs-ipc",
+    "apiVersion": "0.0.0",
+    "entrypoint": "../src/main.js"
+  },
+  "manufacturer": "Google Sheet Proxy",
+  "products": [
+    "Google Sheet Proxy"
+  ],
+  "keywords": [
+    "vmix",
+    "google sheets",
+    "data source",
+    "json"
+  ]
+}

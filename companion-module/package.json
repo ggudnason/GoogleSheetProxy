@@ -1,0 +1,27 @@
+{
+  "name": "companion-module-googlesheetproxy",
+  "version": "1.0.0",
+  "description": "Bitfocus Companion module for Google Sheet Proxy: turn auto refresh on and off, change the interval and show status",
+  "type": "module",
+  "main": "src/main.js",
+  "scripts": {
+    "check": "companion-module-check",
+    "package": "companion-module-build",
+    "test": "node test/run.js"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ggudnason/GoogleSheetProxy.git",
+    "directory": "companion-module"
+  },
+  "engines": {
+    "node": "^22.20"
+  },
+  "dependencies": {
+    "@companion-module/base": "~2.2.2"
+  },
+  "devDependencies": {
+    "@companion-module/tools": "^3.2.0"
+  }
+}

@@ -87,6 +87,10 @@ For graphics that should always show one sheet's rows, the per-sheet URLs are si
 
 If vMix runs on another machine, replace `localhost` with the proxy machine's IP address.
 
+## Bitfocus Companion
+
+The [companion-module](companion-module) folder has a [Bitfocus Companion](https://bitfocus.io/companion) module for controlling the proxy from a Stream Deck. It turns auto refresh on and off, changes the refresh interval, fetches new data now and clears errors, for one spreadsheet or all of them. Its buttons show whether auto refresh is live, paused or has errors. Ready-made presets are created for each spreadsheet. See [companion-module/README.md](companion-module/README.md) to build and install it. It needs Companion 5.1 or newer.
+
 ## Endpoints
 
 | Endpoint | Returns |
